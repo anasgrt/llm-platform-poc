@@ -63,11 +63,10 @@ metadata:
   name: log-analysis-app
   namespace: ai-platform
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: log-analysis-app
   ports:
     - name: http
       port: 8000
       targetPort: 8000
-      nodePort: 30080

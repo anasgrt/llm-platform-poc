@@ -9,8 +9,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: logs.llm-platform.local
-      http:
+    - http:
         paths:
           - path: /
             pathType: Prefix

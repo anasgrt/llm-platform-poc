@@ -25,7 +25,8 @@ spec:
           imagePullPolicy: Never
           # mmap=False loads weights into RAM once. The model lives on a
           # VirtualBox synced /vagrant mount, so on-demand paging would slow
-          # every inference. n_threads=6 uses every core on llm-data.
+          # every inference. n_threads=2 leaves CPU headroom for k3s,
+          # monitoring, and the RAG workload on the 4-core data plane.
           args:
             - "--model"
             - "/models/Qwen3-4B-Q4_K_M.gguf"
@@ -34,9 +35,9 @@ spec:
             - "--use_mlock"
             - "False"
             - "--n_threads"
-            - "6"
+            - "2"
             - "--n_threads_batch"
-            - "6"
+            - "2"
           ports:
             - containerPort: 8080
               name: http
@@ -47,10 +48,10 @@ spec:
           resources:
             requests:
               memory: 4Gi
-              cpu: "5"
+              cpu: "2"
             limits:
               memory: 6Gi
-              cpu: "6"
+              cpu: "4"
           # Startup probe verifies the OpenAI API is actually serving — needs HTTP.
           # Generous timeout because model load + first warmup is slow on CPU.
           startupProbe:

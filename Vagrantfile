@@ -3,7 +3,7 @@
 
 # Multi-VM configuration for better resource isolation
 # Control plane: k3s management (4GB RAM, 2 CPU)
-# Data plane: LLM workloads (20GB RAM, 6 CPU)
+# Data plane: LLM workloads (20GB RAM, 4 CPU)
 
 Vagrant.configure("2") do |config|
   # Ubuntu 24.04 base box
@@ -46,9 +46,9 @@ Vagrant.configure("2") do |config|
     # Private network for inter-VM communication
     control.vm.network "private_network", ip: "192.168.56.10"
 
-    # Management ports (using unique ports to avoid conflicts)
-    control.vm.network "forwarded_port", guest: 80, host: 9080
-    control.vm.network "forwarded_port", guest: 443, host: 8443
+    # Management ports through ingress-nginx NodePorts on the control node
+    control.vm.network "forwarded_port", guest: 30080, host: 9080   # ingress-nginx HTTP
+    control.vm.network "forwarded_port", guest: 30443, host: 8443   # ingress-nginx HTTPS
 
     # Control plane provisioning
     control.vm.provision "shell", path: "vagrant-provision.sh", args: ["control"]
@@ -63,7 +63,7 @@ Vagrant.configure("2") do |config|
     data.vm.provider "virtualbox" do |vb|
       vb.name = "llm-platform-data"
       vb.memory = "20480"  # 20GB RAM for LLM workloads
-      vb.cpus = 6          # 6 CPU cores
+      vb.cpus = 4          # 4 CPU cores
       vb.customize ["modifyvm", :id, "--ioapic", "on"]
       vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
       vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
@@ -73,7 +73,10 @@ Vagrant.configure("2") do |config|
     data.vm.network "private_network", ip: "192.168.56.11"
 
     # Application port forwarding
-    data.vm.network "forwarded_port", guest: 30080, host: 30080  # NodePort for logs
+    data.vm.network "forwarded_port", guest: 30080, host: 30080  # ingress-nginx HTTP
+    data.vm.network "forwarded_port", guest: 30443, host: 30443  # ingress-nginx HTTPS
+    data.vm.network "forwarded_port", guest: 30090, host: 30090  # Prometheus NodePort
+    data.vm.network "forwarded_port", guest: 30300, host: 30300  # Grafana NodePort
 
     # Data plane provisioning
     data.vm.provision "shell", path: "vagrant-provision.sh", args: ["data"]

@@ -6,7 +6,7 @@ set -euo pipefail
 # =============================================================================
 # This script orchestrates the two-VM deployment with resource isolation:
 # - Control plane: k3s management (4GB RAM, 2 CPU)
-# - Data plane: LLM workloads (20GB RAM, 6 CPU)
+# - Data plane: LLM workloads (20GB RAM, 4 CPU)
 #
 # Note: You can also just run 'vagrant up' for automatic deployment.
 #       This script provides more control and better output formatting.
@@ -40,15 +40,17 @@ echo ""
 echo "This will deploy:"
 echo "  • Control plane VM: k3s Kubernetes + management (Ubuntu 24.04)"
 echo "  • Data plane VM: LLM workloads with resource isolation"
-echo "  • Qwen 3.5 7B inference server (llama.cpp)"
+echo "  • Qwen3 4B inference server (llama.cpp)"
 echo "  • Qdrant vector database"
 echo "  • Embedding service (sentence-transformers)"
 echo "  • RAG application (FastAPI)"
+echo "  • Prometheus metrics collection"
+echo "  • Grafana dashboards"
 echo "  • Rancher management UI"
 echo ""
 echo "Resource requirements:"
 echo "  • Control plane: 4GB RAM, 2 CPU cores"
-echo "  • Data plane: 20GB RAM, 6 CPU cores"
+echo "  • Data plane: 20GB RAM, 4 CPU cores"
 echo "  • Total host RAM needed: ≥24GB"
 echo "  • Deployment time: ~15-20 minutes"
 echo ""
@@ -125,11 +127,14 @@ log "━━━━━━━━━━━━━━━━━━━━━━━━━
 log ""
 log "Access Points:"
 log "  - Chat UI:     http://localhost:30080"
-log "  - Rancher UI:  https://localhost:8443"
+log "  - Grafana:     http://localhost:30300 (admin / SuperAdmin@123)"
+log "  - Prometheus:  http://localhost:30090"
+log "  - Rancher UI:  https://rancher.localhost:8443"
 log "  - Rancher PW:  SuperAdmin@123"
 log ""
 log "Monitor with:"
 log "  vagrant ssh control --command 'kubectl get pods -n ai-platform'"
+log "  vagrant ssh control --command 'kubectl get pods -n monitoring'"
 log "  vagrant ssh data --command 'kubectl logs -n ai-platform -l app=log-analysis-app -f'"
 log ""
 log "Manage VMs:"

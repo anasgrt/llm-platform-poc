@@ -40,6 +40,7 @@ expand_disk() {
 
     # Get the root partition device (e.g., /dev/sda1)
     ROOT_PART=$(findmnt -n -o SOURCE / || echo "/dev/root")
+    # shellcheck disable=SC2001
     ROOT_DEV=$(echo "$ROOT_PART" | sed 's/[0-9]*$//')
     ROOT_PART_NUM=$(echo "$ROOT_PART" | grep -oE '[0-9]+$' || echo "1")
 
@@ -232,9 +233,17 @@ provision_control() {
     # Configure DNS
     configure_dns
 
+    # Keep k3s's bundled Traefik disabled across service restarts. setup.sh also
+    # cleans up any Traefik objects from older VMs that were created before this.
+    mkdir -p /etc/rancher/k3s/config.yaml.d
+    cat > /etc/rancher/k3s/config.yaml.d/10-disable-traefik.yaml << 'EOF'
+disable:
+  - traefik
+EOF
+
     # Install k3s as server (control plane)
     echo "==> Installing k3s server..."
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--cluster-init --tls-san 192.168.56.10 --node-ip 192.168.56.10 --advertise-address 192.168.56.10 --flannel-iface=eth1" sh -
+    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--cluster-init --disable=traefik --tls-san 192.168.56.10 --node-ip 192.168.56.10 --advertise-address 192.168.56.10 --flannel-iface=eth1" sh -
 
     # Install kubectl
     install_kubectl
@@ -301,6 +310,7 @@ provision_data() {
         exit 1
     fi
 
+    # shellcheck source=/dev/null
     source /vagrant/join-info.sh
 
     # Install k3s as worker (join existing cluster)

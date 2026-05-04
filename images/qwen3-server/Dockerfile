@@ -34,7 +34,7 @@ VOLUME /models
 EXPOSE 8080
 WORKDIR /models
 
-# Serve Qwen 3.5 7B with OpenAI-compatible API
+# Serve Qwen3 4B with OpenAI-compatible API
 ENTRYPOINT ["python", "-m", "llama_cpp.server", \
     "--host", "0.0.0.0", \
     "--port", "8080", \
