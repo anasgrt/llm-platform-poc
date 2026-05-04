@@ -1,0 +1,90 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# Multi-VM configuration for better resource isolation
+# Control plane: k3s management (4GB RAM, 2 CPU)
+# Data plane: LLM workloads (20GB RAM, 6 CPU)
+
+Vagrant.configure("2") do |config|
+  # Ubuntu 24.04 base box
+  config.vm.box = "bento/ubuntu-24.04"
+  config.vm.box_version = "202502.21.0"
+
+  config.trigger.before :up do |trigger|
+    trigger.name = "Build Docker images"
+    trigger.info = "Building local Docker images before VM provisioning..."
+    trigger.run = {
+      inline: "bash build-images-local.sh"
+    }
+  end
+
+  # Resize disks AFTER VM creation but BEFORE first boot (critical for VMDK format)
+  # This ensures disks are resized before the VM starts, avoiding "locked media" errors
+  config.trigger.before :up do |trigger|
+    trigger.name = "Resize VM disks to allocated size"
+    trigger.info = "Resizing control plane disk to 40GB and data plane disk to 60GB..."
+    trigger.run = {
+      path: "scripts/resize-disks.sh"
+    }
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # VM 1: Control Plane (k3s server + management)
+  # ─────────────────────────────────────────────────────────────────────────────
+  config.vm.define "control" do |control|
+    control.vm.hostname = "llm-control"
+
+    control.vm.provider "virtualbox" do |vb|
+      vb.name = "llm-platform-control"
+      vb.memory = "4096"   # 4GB RAM for control plane
+      vb.cpus = 2          # 2 CPU cores
+      vb.customize ["modifyvm", :id, "--ioapic", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    end
+
+    # Private network for inter-VM communication
+    control.vm.network "private_network", ip: "192.168.56.10"
+
+    # Management ports (using unique ports to avoid conflicts)
+    control.vm.network "forwarded_port", guest: 80, host: 9080
+    control.vm.network "forwarded_port", guest: 443, host: 8443
+
+    # Control plane provisioning
+    control.vm.provision "shell", path: "vagrant-provision.sh", args: ["control"]
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # VM 2: Data Plane (LLM workloads)
+  # ─────────────────────────────────────────────────────────────────────────────
+  config.vm.define "data" do |data|
+    data.vm.hostname = "llm-data"
+
+    data.vm.provider "virtualbox" do |vb|
+      vb.name = "llm-platform-data"
+      vb.memory = "20480"  # 20GB RAM for LLM workloads
+      vb.cpus = 6          # 6 CPU cores
+      vb.customize ["modifyvm", :id, "--ioapic", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    end
+
+    # Private network - same subnet as control plane
+    data.vm.network "private_network", ip: "192.168.56.11"
+
+    # Application port forwarding
+    data.vm.network "forwarded_port", guest: 30080, host: 30080  # NodePort for logs
+
+    # Data plane provisioning
+    data.vm.provision "shell", path: "vagrant-provision.sh", args: ["data"]
+
+    # Deploy application stack after data plane is up
+    data.trigger.after :up do |trigger|
+      trigger.name = "Deploy Stack"
+      trigger.info = "Deploying the LLM stack via setup.sh on control node..."
+      trigger.run = {
+        inline: "vagrant ssh control -c 'cd /vagrant && bash setup.sh'"
+      }
+    end
+  end
+end
