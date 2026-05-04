@@ -19,7 +19,7 @@ python3 -m venv "$VENV_DIR"
 
 # 1. Download Qwen (GGUF) using huggingface_hub
 QWEN_MODEL_FILE="prebuilt-models/${LLM_FILE}"
-if [ ! -f "$QWEN_MODEL_FILE" ] || [ ! -s "$QWEN_MODEL_FILE" ] || [ $(stat -f%z "$QWEN_MODEL_FILE") -lt 1000 ]; then
+if [ ! -f "$QWEN_MODEL_FILE" ] || [ ! -s "$QWEN_MODEL_FILE" ] || [ "$(stat -f%z "$QWEN_MODEL_FILE")" -lt 1000 ]; then
     echo "==> Downloading ${LLM_FILE}..."
     "$VENV_DIR/bin/python3" -c "
 from huggingface_hub import hf_hub_download
