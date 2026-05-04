@@ -69,6 +69,41 @@ step "Pre-building Docker Images"
 # ─────────────────────────────────────────────────────────────────────────────
 log "Docker images built and prepared in ./prebuilt-images/"
 
+# ─────────────────────────────────────────────────────────────────────────────
+step "Setting up Local SSL Certificates (mkcert)"
+# ─────────────────────────────────────────────────────────────────────────────
+if ! command -v mkcert &> /dev/null; then
+  log "Installing mkcert to generate trusted local SSL certificates..."
+  if [[ "$OSTYPE" == "darwin"* ]] && command -v brew &> /dev/null; then
+    log "macOS detected: Installing via Homebrew..."
+    brew install mkcert nss || echo "Failed to install mkcert."
+  elif command -v apt-get &> /dev/null; then
+    log "Debian/Ubuntu host detected: Installing via apt-get..."
+    sudo apt-get update && sudo apt-get install -y libnss3-tools mkcert || echo "Failed to install mkcert."
+  else
+    warn "Package manager not found. Please install mkcert manually for your OS."
+  fi
+fi
+
+if command -v mkcert &> /dev/null; then
+  # Initialize mkcert (creates and installs the local CA in the host's trust store)
+  mkcert -install
+
+  mkdir -p certs
+  log "Generating wildcard/SAN SSL certificates for local domains..."
+  cd certs
+  mkcert -cert-file local-cert.pem -key-file local-key.pem \
+    "localhost" "rancher.localhost" "chat.localhost" "grafana.localhost" "prometheus.localhost"
+  cd ..
+else
+  warn "Using self-signed certificates as mkcert is not available."
+  mkdir -p certs
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout certs/local-key.pem \
+    -out certs/local-cert.pem \
+    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,DNS:rancher.localhost,DNS:chat.localhost,DNS:grafana.localhost,DNS:prometheus.localhost"
+fi
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "Starting Multi-VM Deployment"
@@ -125,12 +160,14 @@ log "━━━━━━━━━━━━━━━━━━━━━━━━━
 log "  LLM Platform Successfully Deployed!"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log ""
-log "Access Points:"
-log "  - Chat UI:     http://localhost:30080"
-log "  - Grafana:     http://localhost:30300 (admin / SuperAdmin@123)"
-log "  - Prometheus:  http://localhost:30090"
+log "Access Points (HTTPS Secured):"
+log "  - Chat UI:     https://chat.localhost:8443"
+log "  - Grafana:     https://grafana.localhost:8443 (admin / SuperAdmin@123)"
+log "  - Prometheus:  https://prometheus.localhost:8443"
 log "  - Rancher UI:  https://rancher.localhost:8443"
 log "  - Rancher PW:  SuperAdmin@123"
+log ""
+log "(Note: Port 8443 is used because Vagrant forwards guest 443 to host 8443)"
 log ""
 log "Monitor with:"
 log "  vagrant ssh control --command 'kubectl get pods -n ai-platform'"
