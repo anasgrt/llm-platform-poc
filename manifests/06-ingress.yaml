@@ -8,8 +8,13 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - chat.localhost
+      secretName: local-tls-cert
   rules:
-    - http:
+    - host: chat.localhost
+      http:
         paths:
           - path: /
             pathType: Prefix
