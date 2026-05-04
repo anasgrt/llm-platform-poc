@@ -23,6 +23,8 @@ if [[ "$NODE_TYPE" != "control" && "$NODE_TYPE" != "data" ]]; then
     exit 1
 fi
 
+K3S_VERSION="v1.35.4+k3s1"
+
 echo "==> Provisioning $NODE_TYPE plane VM..."
 
 # =============================================================================
@@ -243,7 +245,7 @@ EOF
 
     # Install k3s as server (control plane)
     echo "==> Installing k3s server..."
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--cluster-init --disable=traefik --tls-san 192.168.56.10 --node-ip 192.168.56.10 --advertise-address 192.168.56.10 --flannel-iface=eth1" sh -
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC="--cluster-init --disable=traefik --tls-san 192.168.56.10 --node-ip 192.168.56.10 --advertise-address 192.168.56.10 --flannel-iface=eth1" sh -
 
     # Install kubectl
     install_kubectl
@@ -315,7 +317,7 @@ provision_data() {
 
     # Install k3s as worker (join existing cluster)
     echo "==> Joining k3s cluster as worker..."
-    curl -sfL https://get.k3s.io | K3S_URL="$K3S_URL" K3S_TOKEN="$K3S_TOKEN" INSTALL_K3S_EXEC="--node-ip 192.168.56.11 --flannel-iface=eth1" sh -
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" K3S_URL="$K3S_URL" K3S_TOKEN="$K3S_TOKEN" INSTALL_K3S_EXEC="--node-ip 192.168.56.11 --flannel-iface=eth1" sh -
 
     # Install kubectl (useful for local debugging)
     install_kubectl
