@@ -325,6 +325,12 @@ log "Embedding server deployed"
 kubectl apply -f "$SCRIPT_DIR/manifests/04-rag-app.yaml"
 log "Log analysis app deployed"
 
+# Fluent Bit DaemonSet — streams live cluster logs into the rag-app /api/ingest
+# endpoint, which embeds them and upserts vectors into Qdrant. Applied after the
+# rag-app deploy because the HTTP output targets log-analysis-app's Service.
+kubectl apply -f "$SCRIPT_DIR/manifests/08-fluent-bit.yaml"
+log "Fluent Bit live log ingestion deployed"
+
 # Ingress
 kubectl apply -f "$SCRIPT_DIR/manifests/06-ingress.yaml"
 log "Ingress configured"
@@ -349,6 +355,10 @@ kubectl wait --for=condition=Available deployment/qwen3-server -n ai-platform --
 log "Waiting for RAG app..."
 kubectl wait --for=condition=Available deployment/log-analysis-app -n ai-platform --timeout=300s 2>/dev/null || \
   warn "RAG app still starting — check: kubectl logs -n ai-platform deploy/log-analysis-app -f"
+
+log "Waiting for Fluent Bit DaemonSet..."
+kubectl rollout status daemonset/fluent-bit -n ai-platform --timeout=180s 2>/dev/null || \
+  warn "Fluent Bit still starting — check: kubectl logs -n ai-platform -l app.kubernetes.io/name=fluent-bit -f"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "STEP 9: Run log ingestion"
