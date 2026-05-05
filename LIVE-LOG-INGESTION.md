@@ -265,4 +265,4 @@ kubectl rollout restart deployment/log-analysis-app -n ai-platform
 | `HTTP status=503` in fluent-bit logs | embedding-server not ready | `kubectl get pods -n ai-platform` and wait for it to be Running |
 | `points_count` not growing | Path filter doesn't match any active pods | Check `kubectl get pods --all-namespaces` against the `Path` globs |
 | Source field is `live-stream` | `kubernetes` filter didn't enrich (RBAC issue) | Verify ServiceAccount/ClusterRoleBinding from [manifests/08-fluent-bit.yaml](manifests/08-fluent-bit.yaml) is applied |
-| Qdrant fills up disk | No retention set; live ingest is unbounded | Add a periodic Job that DELETEs old points by timestamp, or lower the `Path` scope |
+| Qdrant fills up disk | No retention set; live ingest is unbounded | Retention CronJob is deployed automatically (7 days). Adjust `RETENTION_DAYS` in `manifests/09-log-retention.yaml` if needed |

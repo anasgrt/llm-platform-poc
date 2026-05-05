@@ -139,6 +139,8 @@ curl -s -X POST http://localhost:8080/api/analyze \
 
 ## Ingest your own logs
 
+### Batch ingestion (static files)
+
 ```bash
 # Drop your log files in
 cp /path/to/your/*.log sample-logs/
@@ -153,6 +155,23 @@ kubectl apply -f manifests/05-ingestion-job.yaml
 
 # Watch progress
 kubectl logs -n ai-platform job/log-ingestion -f
+```
+
+### Live ingestion (running pods)
+
+The platform includes a live log ingestion pipeline that streams logs from running pods into the RAG vector store in near real time. See [`LIVE-LOG-INGESTION.md`](LIVE-LOG-INGESTION.md) for full details.
+
+```bash
+# Verify the pipeline is healthy
+kubectl get pods -n ai-platform -l app.kubernetes.io/name=fluent-bit
+
+# Watch Fluent Bit shipping batches
+kubectl logs -n ai-platform -l app.kubernetes.io/name=fluent-bit --tail=20
+
+# Check Qdrant point count growing over time
+kubectl exec -n ai-platform deploy/log-analysis-app -- \
+  python3 -c 'import urllib.request,json; \
+    print(json.loads(urllib.request.urlopen("http://qdrant:6333/collections/logs").read())["result"]["points_count"])'
 ```
 
 ## Monitor
@@ -243,9 +262,9 @@ vagrant destroy
 
 ## What this is / what this isn't
 
-**Is:** A batch log analysis tool. You feed it log files, ask questions, get answers grounded in those logs.
+**Is:** A log analysis tool with both batch and live ingestion. You can feed it static log files via the ingestion job, or let the live pipeline stream logs from running pods in real time. Ask questions, get answers grounded in the most recent logs.
 
-**Isn't:** A live log monitor. It doesn't stream logs from running pods. To analyze new logs, re-run ingestion.
+**Is:** A live log monitor. A Fluent Bit DaemonSet tails container logs from running pods, enriches them with Kubernetes metadata, and streams them into the RAG vector store every 5 seconds. The LLM can answer questions about logs that arrived seconds ago.
 
 ## Components
 
@@ -255,6 +274,8 @@ vagrant destroy
 | embedding-server | sentence-transformers 5.4.1 | 8080 | /health |
 | qdrant | qdrant/qdrant:latest | 6333 | /healthz |
 | log-analysis-app | FastAPI 0.136.0 | 8000 | /health |
+| fluent-bit | fluent/fluent-bit:3.2 | 2020 | /api/v1/health |
+| log-retention | curlimages/curl:latest | — | CronJob (daily at 02:00 UTC) |
 | prometheus | prom/prometheus v2.55.1 | 9090 | /-/ready |
 | grafana | grafana/grafana 11.4.0 | 3000 | /api/health |
 | node-exporter | prometheus/node-exporter v1.8.2 | 9100 | /metrics |

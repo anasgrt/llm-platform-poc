@@ -329,6 +329,10 @@ log "Log analysis app deployed"
 kubectl apply -f "$SCRIPT_DIR/manifests/06-ingress.yaml"
 log "Ingress configured"
 
+# Log retention CronJob
+kubectl apply -f "$SCRIPT_DIR/manifests/09-log-retention.yaml"
+log "Log retention CronJob deployed (deletes points older than 7 days daily at 02:00 UTC)"
+
 # ─────────────────────────────────────────────────────────────────────────────
 step "STEP 8: Wait for services to be ready"
 # ─────────────────────────────────────────────────────────────────────────────
