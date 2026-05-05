@@ -19,10 +19,13 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+
 import httpx
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import traceback
 
 app = FastAPI(title="Log Analysis Platform")
@@ -56,6 +59,9 @@ COLLECTION = os.getenv("COLLECTION", "logs")
 TOP_K = int(os.getenv("TOP_K", "3"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "600"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "256"))
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "4"))
+MAX_NAMESPACE_LOG_POINTS = int(os.getenv("MAX_NAMESPACE_LOG_POINTS", "5000"))
+DEFAULT_NAMESPACE_LOOKBACK_HOURS = int(os.getenv("DEFAULT_NAMESPACE_LOOKBACK_HOURS", "24"))
 QWEN3_TIMEOUT = float(os.getenv("QWEN3_TIMEOUT", "180"))
 USE_LLM = os.getenv("USE_LLM", "false").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -82,6 +88,7 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 def strip_thinking(text: str) -> str:
     """Remove Qwen3 reasoning blocks and any trailing reflection that leaks."""
     text = _THINK_BLOCK_RE.sub("", text)
+    text = text.replace("<think>", "").replace("</think>", "")
     for marker in ("\nWait,", "\nBut wait", "\nHmm,", "\nActually,"):
         idx = text.find(marker)
         if idx != -1:
@@ -89,9 +96,27 @@ def strip_thinking(text: str) -> str:
     return text.strip()
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
 class QueryRequest(BaseModel):
     question: str
     top_k: int = TOP_K
+    history: list[ChatMessage] = Field(default_factory=list)
+
+
+def bound_history(history: list[ChatMessage]) -> list[dict]:
+    """Sanitize and cap the client-supplied turn history.
+
+    Drops anything that isn't a user/assistant message (defends against a
+    client trying to inject a 'system' role) and keeps only the last N turns
+    so CPU inference doesn't blow up on long sessions.
+    """
+    valid = [m for m in history if m.role in ("user", "assistant") and m.content]
+    keep = valid[-(2 * MAX_HISTORY_TURNS):]
+    return [{"role": m.role, "content": m.content} for m in keep]
 
 
 class QueryResponse(BaseModel):
@@ -161,21 +186,27 @@ def build_prompt(question: str, log_chunks: list[dict]) -> str:
 
 # ── Step 4: Call Qwen3 via llama.cpp OpenAI API ──────────────────────────────
 
-def generate_analysis(system: str, user: str) -> str:
+def generate_analysis(system: str, user: str, history: list[dict] | None = None) -> str:
     """Send a chat-formatted request to Qwen3 and return the full completion.
 
     Uses /v1/chat/completions so the Qwen3 chat template is applied properly:
-    the <|im_start|>/<|im_end|> envelope is added by the server, stop tokens
-    fire correctly, and the /no_think directive in the system message is
-    honored. chat_template_kwargs disables thinking for builds that support it.
+    the model-specific chat envelope is added by the server, stop tokens fire
+    correctly, and the /no_think directive in the system message is honored.
+    chat_template_kwargs disables thinking for builds that support it.
+
+    `history` carries prior {role, content} turns so follow-up questions
+    ("what about the second one?") have the context they need. Already
+    bounded by bound_history() at the API layer — assumed safe here.
     """
+    messages: list[dict] = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user})
+
     resp = client.post(
         f"{QWEN3_URL}/v1/chat/completions",
         json={
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": messages,
             "max_tokens": MAX_TOKENS,
             "temperature": 0.3,
             "stream": False,
@@ -185,6 +216,86 @@ def generate_analysis(system: str, user: str) -> str:
     )
     resp.raise_for_status()
     return strip_thinking(resp.json()["choices"][0]["message"]["content"])
+
+
+def _visible_token(token: str, in_think: bool) -> tuple[str, bool]:
+    """Drop streamed <think> blocks while preserving visible answer text."""
+    out: list[str] = []
+    text = token
+    while text:
+        lower = text.lower()
+        if in_think:
+            end = lower.find("</think>")
+            if end == -1:
+                return "".join(out), True
+            text = text[end + len("</think>"):]
+            in_think = False
+            continue
+
+        start = lower.find("<think>")
+        if start == -1:
+            out.append(text)
+            break
+        out.append(text[:start])
+        text = text[start + len("<think>"):]
+        in_think = True
+    return "".join(out), in_think
+
+
+def generate_analysis_stream(system: str, user: str, history: list[dict] | None = None):
+    """Stream tokens from Qwen3 via llama.cpp OpenAI API.
+
+    Yields each content delta as it arrives so the caller can push it to
+    the client immediately.  Uses SSE (text/event-stream) format that
+    llama-cpp-python's OpenAI-compatible server emits.
+    """
+    messages: list[dict] = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user})
+
+    with client.stream(
+        "POST",
+        f"{QWEN3_URL}/v1/chat/completions",
+        json={
+            "messages": messages,
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0.3,
+            "stream": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        timeout=QWEN3_TIMEOUT,
+    ) as resp:
+        resp.raise_for_status()
+        in_think = False
+        for line in resp.iter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            data = line[6:]  # strip "data: " prefix
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                token = delta.get("content", "")
+                if token:
+                    visible, in_think = _visible_token(token, in_think)
+                    if visible:
+                        yield visible
+            except (json.JSONDecodeError, IndexError, KeyError):
+                continue
+
+
+def answer_is_incomplete(answer: str) -> bool:
+    """Detect failed/aborted LLM replies that should use deterministic fallback."""
+    text = strip_thinking(answer).strip()
+    if len(text) < 40:
+        return True
+    tail = text.rsplit(maxsplit=1)[-1].lower().strip("`*_.,")
+    return tail in {
+        "in", "of", "from", "to", "for", "with", "and", "or", "the", "a", "an",
+        "by", "at", "on", "as", "is", "are", "was", "were",
+    }
 
 
 def fast_log_analysis(question: str, log_chunks: list[dict]) -> str:
@@ -220,6 +331,297 @@ def fast_log_analysis(question: str, log_chunks: list[dict]) -> str:
         f"- Evidence:\n{evidence}\n"
         "- Next fix: inspect the named service/pod around these timestamps, then correlate adjacent WARN/FATAL lines for the first failure in the chain."
     )
+
+
+# ── Namespace log pattern path ───────────────────────────────────────────────
+
+ERROR_PATTERN_KEYWORDS = (
+    "error", "errors", "warn", "warning", "warnings", "failed", "failure",
+    "fail", "fatal", "crash", "crashloop", "exception", "timeout", "oom",
+    "pattern", "recurring",
+)
+TIME_WINDOW_RE = re.compile(
+    r"\b(?:last|past)\s+(\d+)\s*(minute|minutes|min|m|hour|hours|hr|hrs|h|day|days|d)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_namespaces(question: str, configured: list[str]) -> list[str]:
+    """Return configured namespaces explicitly named in the question."""
+    q = question.lower()
+    return [ns for ns in configured if ns.lower() in q]
+
+
+def parse_lookback(question: str) -> timedelta | None:
+    q = question.lower()
+    match = TIME_WINDOW_RE.search(q)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith(("minute", "min")) or unit == "m":
+            return timedelta(minutes=amount)
+        if unit.startswith(("hour", "hr")) or unit == "h":
+            return timedelta(hours=amount)
+        if unit.startswith("day") or unit == "d":
+            return timedelta(days=amount)
+    if re.search(r"\b(?:last|past)\s+hour\b", q):
+        return timedelta(hours=1)
+    if re.search(r"\b(?:last|past)\s+day\b", q):
+        return timedelta(days=1)
+    return None
+
+
+def is_namespace_log_pattern_question(question: str) -> bool:
+    namespaces = extract_namespaces(question, METRICS_NAMESPACES)
+    if not namespaces:
+        return False
+    q = question.lower()
+    return any(k in q for k in ERROR_PATTERN_KEYWORDS)
+
+
+def scroll_log_payloads(
+    qdrant_filter: dict | None = None,
+    max_points: int = MAX_NAMESPACE_LOG_POINTS,
+) -> list[dict]:
+    """Read payloads from Qdrant without vector search for exact log analysis."""
+    payloads: list[dict] = []
+    offset = None
+
+    while len(payloads) < max_points:
+        body: dict = {
+            "limit": min(256, max_points - len(payloads)),
+            "with_payload": True,
+            "with_vector": False,
+        }
+        if offset is not None:
+            body["offset"] = offset
+        if qdrant_filter:
+            body["filter"] = qdrant_filter
+
+        resp = client.post(
+            f"{QDRANT_URL}/collections/{COLLECTION}/points/scroll",
+            json=body,
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        result = resp.json().get("result", {})
+        points = result.get("points", [])
+        for point in points:
+            payload = point.get("payload") or {}
+            if payload.get("text"):
+                payloads.append(payload)
+
+        offset = result.get("next_page_offset")
+        if not offset or not points:
+            break
+
+    return payloads
+
+
+def _payload_namespace(payload: dict) -> str:
+    ns = payload.get("namespace")
+    if isinstance(ns, str) and ns:
+        return ns
+    source = str(payload.get("source", ""))
+    if "/" in source:
+        return source.split("/", 1)[0]
+    return ""
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _payload_level(payload: dict) -> str:
+    level = str(payload.get("level", "")).upper()
+    if level == "WARNING":
+        return "WARN"
+    if level == "FATAL":
+        return "ERROR"
+    if level in {"ERROR", "WARN"}:
+        return level
+
+    text = str(payload.get("text", "")).upper()
+    if any(marker in text for marker in ("FATAL", "ERROR", "FAIL", "TIMEOUT", "OOM", "EXCEPTION", "CRASH")):
+        return "ERROR"
+    if re.match(r"^W\d{4}\b", text) or "WARN" in text or "WARNING" in text:
+        return "WARN"
+    if level in {"INFO", "DEBUG"}:
+        return level
+    return "INFO"
+
+
+def fetch_namespace_logs(namespaces: list[str], lookback: timedelta) -> list[dict]:
+    """Fetch logs for namespaces and time window from Qdrant payloads."""
+    since = datetime.now(timezone.utc) - lookback
+    wanted = {ns.lower() for ns in namespaces}
+    entries: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for ns in namespaces:
+        filtered = scroll_log_payloads({
+            "must": [{"key": "namespace", "match": {"value": ns}}]
+        })
+        candidates = filtered + scroll_log_payloads()
+
+        for payload in candidates:
+            if _payload_namespace(payload).lower() not in wanted:
+                continue
+            ts = _parse_timestamp(payload.get("timestamp"))
+            if ts is None or ts < since:
+                continue
+            key = (
+                str(payload.get("source", "")),
+                str(payload.get("timestamp", "")),
+                str(payload.get("text", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({
+                "text": str(payload.get("text", "")),
+                "source": str(payload.get("source", "unknown")),
+                "level": _payload_level(payload),
+                "timestamp": str(payload.get("timestamp", "")),
+                "dt": ts,
+            })
+
+    entries.sort(key=lambda e: e["dt"])
+    return entries
+
+
+def _field_value(text: str, key: str) -> str:
+    quoted = re.search(rf"\b{re.escape(key)}=\"([^\"]+)\"", text)
+    if quoted:
+        return quoted.group(1)
+    bare = re.search(rf"\b{re.escape(key)}=([^ ]+)", text)
+    return bare.group(1) if bare else ""
+
+
+def _signature(text: str) -> str:
+    msg = _field_value(text, "msg")
+    err = _field_value(text, "error") or _field_value(text, "err")
+    quoted_msg = re.search(r'\]\s+"([^"]+)"', text)
+    if quoted_msg and err:
+        return f"{quoted_msg.group(1)}: {err}"
+    if msg and err:
+        return f"{msg}: {err}"
+    if msg:
+        return msg
+    if err:
+        return f"error: {err}"
+
+    normalized = re.sub(r"\d{4}-\d{2}-\d{2}T[^\s]+", "<ts>", text)
+    normalized = re.sub(r"\b\d+(?:\.\d+)?(?:ms|s|m|h|B|KiB|MiB|GiB)?\b", "<n>", normalized)
+    normalized = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized[:160] or "unclassified log line"
+
+
+def _is_problem_entry(entry: dict) -> bool:
+    if entry["level"] in {"ERROR", "WARN"}:
+        return True
+    upper = entry["text"].upper()
+    return any(marker in upper for marker in ("ERROR", "WARN", "FAIL", "FATAL", "CRASH", "TIMEOUT", "OOM"))
+
+
+def _fmt_dt(dt: datetime | None) -> str:
+    if not dt:
+        return "unknown time"
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _lookback_label(lookback: timedelta) -> str:
+    seconds = int(lookback.total_seconds())
+    if seconds % 86400 == 0:
+        days = seconds // 86400
+        return f"last {days} day" + ("" if days == 1 else "s")
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"last {hours} hour" + ("" if hours == 1 else "s")
+    minutes = max(1, seconds // 60)
+    return f"last {minutes} minute" + ("" if minutes == 1 else "s")
+
+
+def _next_action(top_signature: str, sources: list[str]) -> str:
+    sig = top_signature.lower()
+    source_text = " ".join(sources).lower()
+    if "user token not found" in sig or "unauthorized" in sig or "authenticate request" in sig:
+        return "Check Grafana auth/session traffic first: invalid or missing browser/API tokens are generating the repeated warnings."
+    if "broken pipe" in sig or "failed to write metrics" in sig:
+        return "Check the Prometheus scrape path and kube-state-metrics load; the scrape client is closing while metrics are being written."
+    if "prometheus" in source_text:
+        return "Check the Prometheus target, scrape, or query path named in the source before looking at the model stack."
+    return "Check the emitting pod/service for the repeated signature and correlate with pod restarts or recent config changes."
+
+
+def namespace_log_analysis(namespaces: list[str], entries: list[dict], lookback: timedelta) -> str:
+    ns_label = ", ".join(namespaces)
+    window = _lookback_label(lookback)
+    if not entries:
+        return (
+            f"- No logs were found for namespace {ns_label} in the {window}.\n"
+            "- Fluent Bit may not have shipped matching records yet, or the Qdrant retention window has no data for that namespace.\n"
+            "- Next check: verify `/var/log/containers/*_{ns_label}_*.log` exists and Fluent Bit is ingesting into `/api/ingest`."
+        )
+
+    problems = [entry for entry in entries if _is_problem_entry(entry)]
+    first_ts = _fmt_dt(entries[0]["dt"])
+    last_ts = _fmt_dt(entries[-1]["dt"])
+    if not problems:
+        sources = ", ".join(sorted({e["source"] for e in entries})[:5])
+        return (
+            f"- Namespace {ns_label}, {window}: no WARN/ERROR/FATAL pattern found in {len(entries)} logs ({first_ts} to {last_ts}).\n"
+            f"- Sources seen: {sources or 'none'}.\n"
+            "- Next check: ask for pod status or restarts if you want a metrics-based health view instead of log errors."
+        )
+
+    level_counts = Counter(e["level"] for e in problems)
+    error_entries = [entry for entry in problems if entry["level"] == "ERROR"]
+    pattern_entries = error_entries or problems
+    pattern_counts = Counter(_signature(e["text"]) for e in pattern_entries)
+    top_patterns = pattern_counts.most_common(3)
+    top_signature = top_patterns[0][0]
+    top_sources = sorted({e["source"] for e in pattern_entries if _signature(e["text"]) == top_signature})[:3]
+
+    levels = ", ".join(f"{level}={count}" for level, count in sorted(level_counts.items()))
+    patterns = "; ".join(f"{count}x {sig}" for sig, count in top_patterns)
+    pattern_label = "Dominant ERROR pattern" if error_entries else "Dominant pattern"
+    sample = next(e for e in pattern_entries if _signature(e["text"]) == top_signature)
+    sample_text = sample["text"][:220]
+
+    return (
+        f"- Namespace {ns_label}, {window}: {len(problems)} warning/error logs out of {len(entries)} scanned ({first_ts} to {last_ts}); levels: {levels}.\n"
+        f"- {pattern_label}: {patterns}. Main source(s): {', '.join(top_sources)}.\n"
+        f"- Example: {_fmt_dt(sample['dt'])} {sample['source']} -> {sample_text}. Next action: {_next_action(top_signature, top_sources)}"
+    )
+
+
+def namespace_sources(entries: list[dict]) -> list[dict]:
+    problem_entries = [entry for entry in entries if _is_problem_entry(entry)]
+    selected = (problem_entries or entries)[-20:]
+    return [
+        {
+            "text": e["text"],
+            "source": e["source"],
+            "level": e["level"],
+            "timestamp": e["timestamp"],
+        }
+        for e in selected
+    ]
 
 
 # ── Prometheus: live metrics path ────────────────────────────────────────────
@@ -358,8 +760,25 @@ def _ndjson(event_type: str, **fields) -> str:
 def analyze_logs(req: QueryRequest):
     """Streaming RAG endpoint — emits NDJSON events as the answer is generated."""
 
+    bounded_hist = bound_history(req.history)
+
     def event_stream():
         try:
+            if is_namespace_log_pattern_question(req.question):
+                queried = extract_namespaces(req.question, METRICS_NAMESPACES)
+                lookback = parse_lookback(req.question) or timedelta(hours=DEFAULT_NAMESPACE_LOOKBACK_HOURS)
+                ns_label = ", ".join(queried)
+                yield _ndjson("status", data=f"Scanning Qdrant logs for namespace {ns_label} ({_lookback_label(lookback)})...")
+                entries = fetch_namespace_logs(queried, lookback)
+                answer = namespace_log_analysis(queried, entries, lookback)
+                yield _ndjson("token", data=answer)
+                yield _ndjson(
+                    "done",
+                    sources=namespace_sources(entries),
+                    num_chunks_used=len(entries),
+                )
+                return
+
             if is_metrics_question(req.question):
                 queried = select_metrics_namespaces(req.question, METRICS_NAMESPACES)
                 ns_label = ", ".join(queried)
@@ -367,13 +786,23 @@ def analyze_logs(req: QueryRequest):
                 metrics_text = metrics_snapshot(queried)
                 if USE_LLM:
                     yield _ndjson("status", data="Generating analysis from live metrics...")
-                    answer = generate_analysis(
-                        METRICS_SYSTEM_PROMPT,
-                        build_metrics_prompt(req.question, metrics_text),
-                    )
+                    try:
+                        answer_parts = []
+                        for token in generate_analysis_stream(
+                            METRICS_SYSTEM_PROMPT,
+                            build_metrics_prompt(req.question, metrics_text),
+                            bounded_hist,
+                        ):
+                            answer_parts.append(token)
+                        answer = strip_thinking("".join(answer_parts))
+                        if answer_is_incomplete(answer):
+                            answer = fast_metrics_analysis(req.question, metrics_text)
+                    except Exception:
+                        answer = fast_metrics_analysis(req.question, metrics_text)
+                    yield _ndjson("token", data=answer)
                 else:
                     answer = fast_metrics_analysis(req.question, metrics_text)
-                yield _ndjson("token", data=answer)
+                    yield _ndjson("token", data=answer)
                 yield _ndjson(
                     "done",
                     sources=[{"source": f"prometheus:{ns}"} for ns in queried],
@@ -392,19 +821,24 @@ def analyze_logs(req: QueryRequest):
 
             if USE_LLM:
                 yield _ndjson("status", data=f"Generating analysis from {len(log_chunks)} retrieved chunks...")
-                answer = generate_analysis(
-                    SYSTEM_PROMPT,
-                    build_prompt(req.question, log_chunks),
-                )
+                try:
+                    answer_parts = []
+                    for token in generate_analysis_stream(
+                        SYSTEM_PROMPT,
+                        build_prompt(req.question, log_chunks),
+                        bounded_hist,
+                    ):
+                        answer_parts.append(token)
+                    answer = strip_thinking("".join(answer_parts))
+                    if answer_is_incomplete(answer):
+                        answer = fast_log_analysis(req.question, log_chunks)
+                except Exception:
+                    answer = fast_log_analysis(req.question, log_chunks)
+                yield _ndjson("token", data=answer)
             else:
                 yield _ndjson("status", data=f"Summarizing {len(log_chunks)} retrieved chunks...")
                 answer = fast_log_analysis(req.question, log_chunks)
-
-            if answer:
                 yield _ndjson("token", data=answer)
-            else:
-                yield _ndjson("error", data="Analysis returned an empty result.")
-                return
 
             yield _ndjson("done", sources=log_chunks, num_chunks_used=len(log_chunks))
         except httpx.HTTPStatusError as e:
@@ -473,6 +907,9 @@ def parse_shipper_record(rec: dict) -> dict | None:
     return {
         "text": text,
         "source": source,
+        "namespace": ns,
+        "pod": pod,
+        "container": container,
         "level": level,
         "timestamp": rec.get("@timestamp") or rec.get("time") or rec.get("date") or "",
     }
@@ -648,6 +1085,28 @@ function saveHistory(){
   localStorage.setItem(STORAGE_KEY,JSON.stringify(history));
 }
 
+// Walk the visible chat to build the {role, content} list the server expects.
+// Only completed user→bot pairs count; the just-appended in-progress user msg
+// has no bot pair yet, so it's correctly excluded.
+function buildHistoryPayload(){
+  const out=[];
+  let pendingUser=null;
+  for(const el of chat.children){
+    if(el.classList.contains('user')){
+      pendingUser=el.textContent;
+    }else if(el.classList.contains('bot')&&pendingUser){
+      const body=el.querySelector('span')||el;
+      const answer=body.textContent.trim();
+      if(answer){
+        out.push({role:'user',content:pendingUser});
+        out.push({role:'assistant',content:answer});
+      }
+      pendingUser=null;
+    }
+  }
+  return out;
+}
+
 form.addEventListener('submit',send);
 btn.addEventListener('click',send);
 q.addEventListener('keydown',e=>{
@@ -672,7 +1131,8 @@ async function send(e){
   let answer='';
   let sourcesText='';
   try{
-    const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:text})});
+    const history=buildHistoryPayload();
+    const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:text,history})});
     if(!r.ok){
       let detail=''; try{ detail=(await r.json()).detail||''; }catch(_){}
       throw new Error(detail||('HTTP '+r.status));

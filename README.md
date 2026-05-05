@@ -107,6 +107,8 @@ vagrant ssh control -c 'cd /vagrant && ./setup.sh'
 | Chat UI HTTPS | https://localhost:30443 | Host machine (self-signed/default local cert warning expected) |
 | Rancher UI | https://rancher.localhost:8443 | Host machine (forwarded through ingress-nginx on control plane) |
 
+**Note:** The ingress is configured for `localhost` host. If you previously used `chat.localhost`, update your hosts file or use `localhost` directly.
+
 Rancher password: `SuperAdmin@123`
 Grafana login: `admin` / `SuperAdmin@123`
 

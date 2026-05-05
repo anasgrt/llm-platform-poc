@@ -10,10 +10,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - chat.localhost
+        - localhost
       secretName: local-tls-cert
   rules:
-    - host: chat.localhost
+    - host: localhost
       http:
         paths:
           - path: /
