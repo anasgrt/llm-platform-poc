@@ -2,28 +2,20 @@
 set -euo pipefail
 
 # =============================================================================
-# LLM Log Analysis Platform — Vagrant + k3s + Qwen3 4B (no Ollama)
+# LLM Platform Infrastructure — Vagrant + k3s + Rancher + ArgoCD
 # =============================================================================
 # Target: MacBook Pro M1 Pro, 32GB RAM, VirtualBox + Vagrant
 #
-# What gets deployed:
-#   - Vagrant VM with k3s Kubernetes cluster
-#   - Qwen3 4B (GGUF) via llama.cpp server — direct, no Ollama
-#   - Qdrant vector database
-#   - Sentence-transformers embedding service
-#   - FastAPI RAG app for log analysis
-#   - Sample log ingestion pipeline
+# What gets installed here:
+#   - k3s Kubernetes cluster validation
+#   - cert-manager
+#   - ingress-nginx
+#   - Rancher
+#   - ArgoCD
+#   - Namespaces and local TLS secrets for GitOps-managed workloads
 #
-# Resource budget:
-#   Vagrant VM:        ~2 GB (base system)
-#   k3s system:        ~1 GB
-#   Qwen3 4B:          ~6 GB RAM (Q4_K_M quantized + context)
-#   Qdrant:            ~1 GB (vector storage + HNSW indexes)
-#   Embeddings:        ~2 GB (sentence-transformers + batch processing)
-#   RAG app:           ~512 MB (FastAPI + HTTP connections)
-#   Ingestion job:     ~1 GB (temporary, during log processing)
-#   Monitoring:        ~1 GB (Prometheus, Grafana, node-exporter, kube-state-metrics)
-#   Total:             ~20-21 GB (Host needs ≥24 GB allocated to VMs)
+# Application and monitoring workloads are deployed by ArgoCD from:
+#   ../LLM-PLATFORM-POC-ARGOCD
 # =============================================================================
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -32,7 +24,6 @@ warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 step() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  $1${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RANCHER_HOSTNAME="rancher.localhost"
 RANCHER_PASSWORD="SuperAdmin@123"
 ARGOCD_PASSWORD="$RANCHER_PASSWORD"   # shared admin password across consoles
@@ -184,7 +175,7 @@ helm repo update ingress-nginx
 # - Both http (30080) and https (30443) NodePorts are pinned so they don't drift
 #   on reinstall; Vagrant port-forwarding depends on stable values.
 # - Traefik is disabled, so nginx is marked as the cluster's default class.
-#   Our own Ingress manifests still set ingressClassName: nginx explicitly.
+#   GitOps workload Ingress manifests still set ingressClassName: nginx explicitly.
 log "Installing/upgrading ingress-nginx ${INGRESS_NGINX_VERSION} (DaemonSet)..."
 helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --version "$INGRESS_NGINX_VERSION" \
@@ -218,18 +209,6 @@ if [ -f /vagrant/certs/local-cert.pem ] && [ -f /vagrant/certs/local-key.pem ]; 
     --cert=/vagrant/certs/local-cert.pem \
     --key=/vagrant/certs/local-key.pem \
     -n cattle-system --dry-run=client -o yaml | kubectl apply -f -
-
-  kubectl create namespace ai-platform --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create secret tls local-tls-cert \
-    --cert=/vagrant/certs/local-cert.pem \
-    --key=/vagrant/certs/local-key.pem \
-    -n ai-platform --dry-run=client -o yaml | kubectl apply -f -
-
-  kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create secret tls local-tls-cert \
-    --cert=/vagrant/certs/local-cert.pem \
-    --key=/vagrant/certs/local-key.pem \
-    -n monitoring --dry-run=client -o yaml | kubectl apply -f -
 
   RANCHER_TLS_SOURCE="secret"
 else
@@ -272,118 +251,27 @@ kubectl -n cattle-system rollout status deploy/rancher-webhook --timeout=300s ||
 log "Rancher is ready at https://$RANCHER_HOSTNAME:8443"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 5: Deploy monitoring stack"
+step "STEP 5: Prepare GitOps workload namespaces"
 # ─────────────────────────────────────────────────────────────────────────────
 
-kubectl apply -f "$SCRIPT_DIR/manifests/07-monitoring.yaml"
-log "Prometheus, Grafana, node-exporter, and kube-state-metrics deployed"
+for ns in ai-platform monitoring; do
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+done
 
-log "Waiting for monitoring stack..."
-kubectl -n monitoring rollout status daemonset/node-exporter --timeout=600s || \
-  err "node-exporter failed to become ready. Check: kubectl get pods -n monitoring"
-kubectl -n monitoring rollout status deploy/kube-state-metrics --timeout=600s || \
-  err "kube-state-metrics failed to become ready. Check: kubectl logs -n monitoring deploy/kube-state-metrics"
-kubectl -n monitoring rollout status deploy/prometheus --timeout=600s || \
-  err "Prometheus failed to become ready. Check: kubectl logs -n monitoring deploy/prometheus"
-kubectl -n monitoring rollout status deploy/grafana --timeout=600s || \
-  err "Grafana failed to become ready. Check: kubectl logs -n monitoring deploy/grafana"
-
-log "Monitoring access from host: Prometheus http://localhost:30090, Grafana http://localhost:30300"
-
-# ─────────────────────────────────────────────────────────────────────────────
-step "STEP 6: Build container images (no Ollama — raw llama.cpp)"
-# ─────────────────────────────────────────────────────────────────────────────
-
-log "Skipping image building on control plane — images are pre-built on the host"
-log "Using images imported into k3s containerd during VM provisioning"
-
-# ─────────────────────────────────────────────────────────────────────────────
-step "STEP 7: Deploy the LLM platform stack"
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Namespace
-kubectl apply -f "$SCRIPT_DIR/manifests/00-namespace.yaml"
-
-# Create ConfigMap from sample log files
-kubectl create configmap sample-logs \
-  --from-file="$SCRIPT_DIR/sample-logs/" \
-  -n ai-platform \
-  --dry-run=client -o yaml | kubectl apply -f -
-log "Sample logs ConfigMap created"
-
-# Qdrant
-kubectl apply -f "$SCRIPT_DIR/manifests/01-qdrant.yaml"
-log "Qdrant deployed"
-
-# Qwen3 4B — model download + inference server
-kubectl apply -f "$SCRIPT_DIR/manifests/02-qwen3-server.yaml"
-log "Qwen3 4B model download started + server deployment created"
-
-# Embedding server
-kubectl apply -f "$SCRIPT_DIR/manifests/03-embedding-server.yaml"
-log "Embedding server deployed"
-
-# RAG app
-kubectl apply -f "$SCRIPT_DIR/manifests/04-rag-app.yaml"
-log "Log analysis app deployed"
-
-# Fluent Bit DaemonSet — streams live cluster logs into the rag-app /api/ingest
-# endpoint, which embeds them and upserts vectors into Qdrant. Applied after the
-# rag-app deploy because the HTTP output targets log-analysis-app's Service.
-kubectl apply -f "$SCRIPT_DIR/manifests/08-fluent-bit.yaml"
-log "Fluent Bit live log ingestion deployed"
-
-# Ingress
-kubectl apply -f "$SCRIPT_DIR/manifests/06-ingress.yaml"
-log "Ingress configured"
-
-# Log retention CronJob
-kubectl apply -f "$SCRIPT_DIR/manifests/09-log-retention.yaml"
-log "Log retention CronJob deployed (deletes points older than 7 days daily at 02:00 UTC)"
-
-# ─────────────────────────────────────────────────────────────────────────────
-step "STEP 8: Wait for services to be ready"
-# ─────────────────────────────────────────────────────────────────────────────
-
-log "Waiting for Qdrant..."
-kubectl wait --for=condition=Available deployment/qdrant -n ai-platform --timeout=120s
-
-log "Waiting for embedding server (first run downloads model ~80MB)..."
-kubectl wait --for=condition=Available deployment/embedding-server -n ai-platform --timeout=600s 2>/dev/null || \
-  warn "Embedding server still starting — check: kubectl logs -n ai-platform deploy/embedding-server -f"
-
-log "Waiting for Qwen3 4B model download (GGUF, this takes time)..."
-
-log "Waiting for Qwen3 4B server (model loading takes 5-10 minutes)..."
-kubectl wait --for=condition=Available deployment/qwen3-server -n ai-platform --timeout=1200s 2>/dev/null || \
-  warn "Qwen3 4B still loading — check: kubectl logs -n ai-platform deploy/qwen3-server -f"
-
-log "Waiting for RAG app..."
-kubectl wait --for=condition=Available deployment/log-analysis-app -n ai-platform --timeout=300s 2>/dev/null || \
-  warn "RAG app still starting — check: kubectl logs -n ai-platform deploy/log-analysis-app -f"
-
-log "Waiting for Fluent Bit DaemonSet..."
-kubectl rollout status daemonset/fluent-bit -n ai-platform --timeout=180s 2>/dev/null || \
-  warn "Fluent Bit still starting — check: kubectl logs -n ai-platform -l app.kubernetes.io/name=fluent-bit -f"
-
-# ─────────────────────────────────────────────────────────────────────────────
-step "STEP 9: Run log ingestion"
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Delete previous job run if exists
-kubectl delete job log-ingestion -n ai-platform --ignore-not-found 2>/dev/null
-
-kubectl apply -f "$SCRIPT_DIR/manifests/05-ingestion-job.yaml"
-log "Ingestion job started — processing sample logs..."
-
-if kubectl wait --for=condition=Complete job/log-ingestion -n ai-platform --timeout=300s 2>/dev/null; then
-  log "Ingestion complete"
+if [ -f /vagrant/certs/local-cert.pem ] && [ -f /vagrant/certs/local-key.pem ]; then
+  for ns in ai-platform monitoring; do
+    kubectl create secret tls local-tls-cert \
+      --cert=/vagrant/certs/local-cert.pem \
+      --key=/vagrant/certs/local-key.pem \
+      -n "$ns" --dry-run=client -o yaml | kubectl apply -f -
+  done
+  log "Local TLS secrets prepared for ArgoCD-managed workloads"
 else
-  warn "Ingestion still running — check: kubectl logs -n ai-platform job/log-ingestion -f"
+  warn "No local SSL certificates found for workload ingresses. ArgoCD-managed ingresses will need TLS secrets later."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 10: Install ArgoCD"
+step "STEP 6: Install ArgoCD"
 # ─────────────────────────────────────────────────────────────────────────────
 
 helm_repo_add_or_update argo https://argoproj.github.io/argo-helm
@@ -510,23 +398,17 @@ fi
 log "Traefik is disabled and no Traefik ingress path remains"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "DONE — Platform is ready"
+step "DONE — Infrastructure is ready"
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo ""
 echo -e "${GREEN}┌──────────────────────────────────────────────────────────┐${NC}"
-echo -e "${GREEN}│  LLM Log Analysis Platform (HTTPS Secured via mkcert)   │${NC}"
+echo -e "${GREEN}│  LLM Platform Infrastructure (HTTPS via mkcert)          │${NC}"
 echo -e "${GREEN}├──────────────────────────────────────────────────────────┤${NC}"
 echo -e "${GREEN}│  Rancher UI:    https://rancher.localhost:8443           │${NC}"
 echo -e "${GREEN}│  ArgoCD UI:     https://argocd.localhost:8443            │${NC}"
-echo -e "${GREEN}│  Chat UI:       https://chat.localhost:8443              │${NC}"
-echo -e "${GREEN}│  Grafana:       https://grafana.localhost:8443           │${NC}"
-echo -e "${GREEN}│  Prometheus:    https://prometheus.localhost:8443        │${NC}"
-echo -e "${GREEN}│  Qdrant:        kubectl port-forward svc/qdrant 6333     │${NC}"
-echo -e "${GREEN}│  Qwen3 4B API:  kubectl port-forward svc/qwen3-server 8000│${NC}"
 echo -e "${GREEN}├──────────────────────────────────────────────────────────┤${NC}"
 echo -e "${GREEN}│  Rancher password: $RANCHER_PASSWORD                     │${NC}"
-echo -e "${GREEN}│  Grafana login:    admin / $RANCHER_PASSWORD             │${NC}"
 echo -e "${GREEN}│  ArgoCD login:     admin / $ARGOCD_PASSWORD              │${NC}"
 echo -e "${GREEN}└──────────────────────────────────────────────────────────┘${NC}"
 echo ""
@@ -534,12 +416,15 @@ echo "Note: Vagrant forwards guest HTTPS 443 to host 8443."
 echo "If domains do not resolve, add them to your host's /etc/hosts file:"
 echo "127.0.0.1 rancher.localhost chat.localhost grafana.localhost prometheus.localhost argocd.localhost"
 echo ""
-echo "Test with:"
+echo "Next, apply the ArgoCD Application from the GitOps repository after it is pushed:"
+echo "  kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml"
+echo ""
+echo "After ArgoCD syncs, test with:"
 echo "  curl -k -X POST https://chat.localhost:8443/api/analyze \\"
 echo "    -H 'Content-Type: application/json' \\"
 echo "    -d '{\"question\": \"What errors are recurring in the logs?\"}'"
 echo ""
-echo "Monitor:"
+echo "Monitor GitOps workloads after sync:"
 echo "  kubectl get pods -n ai-platform -w"
 echo "  kubectl get pods -n monitoring -w"
 echo "  kubectl logs -n ai-platform deploy/qwen3-server -f"

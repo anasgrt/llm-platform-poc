@@ -47,7 +47,7 @@ kubeconfig*
 *.kubeconfig
 k3s.yaml
 
-# Generated model and image artifacts
+# Generated local artifacts
 prebuilt-images/
 prebuilt-models/
 *.tar
@@ -62,5 +62,3 @@ README.pdf
 
 # Runtime logs outside checked-in samples
 *.log
-!sample-logs/
-!sample-logs/*.log

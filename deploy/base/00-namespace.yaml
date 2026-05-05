@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ai-platform
-  labels:
-    app.kubernetes.io/part-of: llm-platform
