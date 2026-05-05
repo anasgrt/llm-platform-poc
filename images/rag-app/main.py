@@ -572,6 +572,7 @@ header span{font-size:12px;background:#2a4a3a;color:#4ade80;padding:2px 10px;bor
 <header>
   <h1>Log Analysis Platform</h1>
   <span>__MODEL_NAME__</span>
+  <button id="clearBtn" style="margin-left:auto;background:#2a2d3a;color:#888;border:1px solid #3a3d4a;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">Clear</button>
 </header>
 <div class="chat" id="chat">
   <div class="msg bot">Ready. Ask me about your logs — errors, patterns, root causes, correlations.<br><br>
@@ -583,7 +584,54 @@ Examples:<br>• What errors keep recurring?<br>• Why are pods crashlooping?<b
 </form>
 <script>
 const chat=document.getElementById('chat'),form=document.getElementById('form'),q=document.getElementById('q'),btn=document.getElementById('btn');
+const STORAGE_KEY='log_chat_history';
+const MAX_HISTORY=50;
 let busy=false;
+
+function loadHistory(){
+  try{
+    const raw=localStorage.getItem(STORAGE_KEY);
+    if(!raw) return;
+    const history=JSON.parse(raw);
+    if(!Array.isArray(history)||!history.length) return;
+    chat.innerHTML='';
+    for(const item of history){
+      chat.innerHTML+=`<div class="msg user">${esc(item.q)}</div>`;
+      const bubble=document.createElement('div');
+      bubble.className='msg bot';
+      const body=document.createElement('span');
+      body.textContent=item.a;
+      bubble.appendChild(body);
+      if(item.src){
+        const src=document.createElement('div');
+        src.className='sources';
+        src.textContent=item.src;
+        bubble.appendChild(src);
+      }
+      chat.appendChild(bubble);
+    }
+    chat.scrollTop=chat.scrollHeight;
+  }catch(_){}
+}
+
+function saveHistory(){
+  const msgs=Array.from(chat.children);
+  const history=[];
+  let lastUser=null;
+  for(const el of msgs){
+    if(el.classList.contains('user')){
+      lastUser=el.textContent;
+    }else if(el.classList.contains('bot')&&lastUser){
+      const body=el.querySelector('span')||el;
+      const srcEl=el.querySelector('.sources');
+      history.push({q:lastUser,a:body.textContent,src:srcEl?srcEl.textContent:''});
+      lastUser=null;
+    }
+  }
+  if(history.length>MAX_HISTORY) history.splice(0,history.length-MAX_HISTORY);
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(history));
+}
+
 form.addEventListener('submit',send);
 btn.addEventListener('click',send);
 q.addEventListener('keydown',e=>{
@@ -601,11 +649,12 @@ async function send(e){
   const bubble=document.createElement('div');
   bubble.className='msg bot';
   const body=document.createElement('span');
-  const status=document.createElement('span');
+  let status=document.createElement('span');
   status.innerHTML='<div class="spinner"></div> Retrieving logs...';
   bubble.appendChild(body); bubble.appendChild(status);
   chat.appendChild(bubble); chat.scrollTop=chat.scrollHeight;
   let answer='';
+  let sourcesText='';
   try{
     const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:text})});
     if(!r.ok){
@@ -623,7 +672,7 @@ async function send(e){
         if(!line.trim()) continue;
         let evt; try{ evt=JSON.parse(line); }catch(_){ continue; }
         if(evt.type==='token'){
-          if(status){ status.remove(); }
+          if(status){ status.remove(); status=null; }
           answer+=evt.data;
           body.textContent=answer;
         } else if(evt.type==='status'){
@@ -632,7 +681,8 @@ async function send(e){
           if(evt.sources&&evt.sources.length){
             const src=document.createElement('div');
             src.className='sources';
-            src.textContent=`Based on ${evt.num_chunks_used} log chunks from: ${[...new Set(evt.sources.map(s=>s.source))].join(', ')}`;
+            sourcesText=`Based on ${evt.num_chunks_used} log chunks from: ${[...new Set(evt.sources.map(s=>s.source))].join(', ')}`;
+            src.textContent=sourcesText;
             bubble.appendChild(src);
           }
         } else if(evt.type==='error'){
@@ -643,9 +693,17 @@ async function send(e){
     }
   }catch(e){bubble.innerHTML='Error: '+esc(e.message)}
   busy=false; btn.disabled=false; q.focus(); chat.scrollTop=chat.scrollHeight;
+  saveHistory();
 }
 window.send=send;
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+loadHistory();
+
+document.getElementById('clearBtn').addEventListener('click',()=>{
+  if(!confirm('Clear chat history?')) return;
+  localStorage.removeItem(STORAGE_KEY);
+  chat.innerHTML=`<div class="msg bot">Ready. Ask me about your logs — errors, patterns, root causes, correlations.<br><br>Examples:<br>• What errors keep recurring?<br>• Why are pods crashlooping?<br>• Summarize the NGINX 5xx errors<br>• What happened around 03:14 UTC?</div>`;
+});
 </script>
 </body></html>"""
 
