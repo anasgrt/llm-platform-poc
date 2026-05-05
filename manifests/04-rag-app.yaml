@@ -30,18 +30,22 @@ spec:
               value: "http://embedding-server:8080"
             - name: QDRANT_URL
               value: "http://qdrant:6333"
+            - name: PROMETHEUS_URL
+              value: "http://prometheus.monitoring.svc.cluster.local:9090"
+            - name: METRICS_NAMESPACE
+              value: "ai-platform,monitoring"
             - name: COLLECTION
               value: "logs"
             - name: TOP_K
-              value: "3"
+              value: "6"
             - name: MAX_CONTEXT_CHARS
-              value: "600"
+              value: "1000"
             - name: MAX_TOKENS
-              value: "48"
+              value: "300"
             - name: QWEN3_TIMEOUT
-              value: "180"
+              value: "300"
             - name: USE_LLM
-              value: "false"
+              value: "true"
           resources:
             requests:
               memory: 256Mi

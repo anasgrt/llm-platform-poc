@@ -35,9 +35,9 @@ spec:
             - "--use_mlock"
             - "False"
             - "--n_threads"
-            - "2"
+            - "4"
             - "--n_threads_batch"
-            - "2"
+            - "4"
           ports:
             - containerPort: 8080
               name: http
