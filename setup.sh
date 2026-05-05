@@ -35,13 +35,14 @@ step() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━�
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RANCHER_HOSTNAME="rancher.localhost"
 RANCHER_PASSWORD="SuperAdmin@123"
+ARGOCD_PASSWORD="$RANCHER_PASSWORD"   # shared admin password across consoles
 
 # Helm chart versions — pinned for reproducibility. Bumping any of these without
 # verifying upgrade compatibility (CRDs, breaking changes) will break setup.
 CERT_MANAGER_VERSION="v1.20.2"
 RANCHER_VERSION="2.14.1"
 INGRESS_NGINX_VERSION="4.15.1"
-ARGOCD_CHART_VERSION="7.7.10"   # argo-cd chart 7.x ⇒ ArgoCD ~2.13
+ARGOCD_CHART_VERSION="7.8.27"   # argo-cd chart 7.8.27 ⇒ ArgoCD v2.14.10
 
 helm_repo_add_or_update() {
   local name="$1"
@@ -399,6 +400,17 @@ if [ -f /vagrant/certs/local-cert.pem ] && [ -f /vagrant/certs/local-key.pem ]; 
     -n argocd --dry-run=client -o yaml | kubectl apply -f -
 fi
 
+# Pin the admin password by passing a bcrypt hash to the chart. The Mtime field
+# is what triggers ArgoCD to re-read the password on `helm upgrade` — bumping
+# it on every run guarantees a password change actually takes effect. Setting
+# argocdServerAdminPassword also suppresses creation of argocd-initial-admin-secret.
+if ! command -v htpasswd >/dev/null; then
+  log "Installing apache2-utils for bcrypt password hashing..."
+  sudo apt-get update -qq && sudo apt-get install -y -qq apache2-utils
+fi
+ARGOCD_PASSWORD_BCRYPT=$(htpasswd -nbBC 10 "" "$ARGOCD_PASSWORD" | tr -d ':\n' | sed 's|^\$2y|\$2a|')
+ARGOCD_PASSWORD_MTIME=$(date -u +%FT%TZ)
+
 # Build values inline. server.insecure=true makes argocd-server speak plain
 # HTTP to the ingress; nginx terminates TLS upstream. Skipping that flag forces
 # HTTPS-on-HTTPS, which needs backend-protocol=HTTPS plus a self-signed cert
@@ -411,6 +423,14 @@ global:
 configs:
   params:
     server.insecure: true
+  secret:
+    argocdServerAdminPasswordMtime: "$ARGOCD_PASSWORD_MTIME"
+EOF
+# bcrypt hash contains literal $; write it via single-quoted YAML so the
+# unquoted heredoc above doesn't try to expand $2a / $10 as shell vars.
+printf "    argocdServerAdminPassword: '%s'\n" "$ARGOCD_PASSWORD_BCRYPT" >> "$ARGOCD_VALUES"
+
+cat >> "$ARGOCD_VALUES" <<EOF
 
 server:
   ingress:
@@ -448,7 +468,7 @@ kubectl -n argocd rollout status statefulset/argocd-application-controller --tim
   warn "argocd-application-controller not yet rolled out"
 
 log "ArgoCD ready at https://argocd.localhost:8443"
-log "Admin password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+log "Login: admin / $ARGOCD_PASSWORD"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "Helm release health check"
@@ -507,9 +527,7 @@ echo -e "${GREEN}│  Qwen3 4B API:  kubectl port-forward svc/qwen3-server 8000�
 echo -e "${GREEN}├──────────────────────────────────────────────────────────┤${NC}"
 echo -e "${GREEN}│  Rancher password: $RANCHER_PASSWORD                     │${NC}"
 echo -e "${GREEN}│  Grafana login:    admin / $RANCHER_PASSWORD             │${NC}"
-echo -e "${GREEN}│  ArgoCD admin pwd: kubectl -n argocd get secret \\         │${NC}"
-echo -e "${GREEN}│    argocd-initial-admin-secret -o \\                      │${NC}"
-echo -e "${GREEN}│    jsonpath='{.data.password}' | base64 -d              │${NC}"
+echo -e "${GREEN}│  ArgoCD login:     admin / $ARGOCD_PASSWORD              │${NC}"
 echo -e "${GREEN}└──────────────────────────────────────────────────────────┘${NC}"
 echo ""
 echo "Note: Vagrant forwards guest HTTPS 443 to host 8443."
