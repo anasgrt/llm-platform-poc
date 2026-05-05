@@ -54,7 +54,7 @@ data:
     [INPUT]
         Name              tail
         Tag               kube.*
-        Path              /var/log/containers/*_ai-platform_*.log,/var/log/containers/*_monitoring_*.log
+        Path              /var/log/containers/*.log
         Exclude_Path      *log-analysis-app*,*embedding-server*,*qdrant*,*log-ingestion*
         Parser            cri
         DB                /var/log/flb_kube.db
