@@ -41,6 +41,7 @@ RANCHER_PASSWORD="SuperAdmin@123"
 CERT_MANAGER_VERSION="v1.20.2"
 RANCHER_VERSION="2.14.1"
 INGRESS_NGINX_VERSION="4.15.1"
+ARGOCD_CHART_VERSION="7.7.10"   # argo-cd chart 7.x ⇒ ArgoCD ~2.13
 
 helm_repo_add_or_update() {
   local name="$1"
@@ -381,6 +382,75 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+step "STEP 10: Install ArgoCD"
+# ─────────────────────────────────────────────────────────────────────────────
+
+helm_repo_add_or_update argo https://argoproj.github.io/argo-helm
+helm repo update argo
+
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+# Reuse the mkcert-issued local TLS cert if it's been generated (deploy.sh).
+# Without it, the chart falls back to its own self-signed cert via tls: true.
+if [ -f /vagrant/certs/local-cert.pem ] && [ -f /vagrant/certs/local-key.pem ]; then
+  kubectl create secret tls local-tls-cert \
+    --cert=/vagrant/certs/local-cert.pem \
+    --key=/vagrant/certs/local-key.pem \
+    -n argocd --dry-run=client -o yaml | kubectl apply -f -
+fi
+
+# Build values inline. server.insecure=true makes argocd-server speak plain
+# HTTP to the ingress; nginx terminates TLS upstream. Skipping that flag forces
+# HTTPS-on-HTTPS, which needs backend-protocol=HTTPS plus a self-signed cert
+# nginx must trust — overkill for a single-cluster local setup.
+ARGOCD_VALUES=/tmp/argocd-values.yaml
+cat > "$ARGOCD_VALUES" <<EOF
+global:
+  domain: argocd.localhost
+
+configs:
+  params:
+    server.insecure: true
+
+server:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hostname: argocd.localhost
+EOF
+if [ -f /vagrant/certs/local-cert.pem ] && [ -f /vagrant/certs/local-key.pem ]; then
+  cat >> "$ARGOCD_VALUES" <<EOF
+    tls:
+      - secretName: local-tls-cert
+        hosts:
+          - argocd.localhost
+EOF
+else
+  cat >> "$ARGOCD_VALUES" <<EOF
+    tls: true
+EOF
+fi
+
+log "Installing/upgrading ArgoCD (chart ${ARGOCD_CHART_VERSION})..."
+helm upgrade --install argocd argo/argo-cd \
+  --version "$ARGOCD_CHART_VERSION" \
+  --namespace argocd \
+  --values "$ARGOCD_VALUES" \
+  --wait --timeout 600s || err "argocd helm upgrade failed — check: helm history argocd -n argocd"
+
+log "Waiting for ArgoCD components to roll out..."
+for d in argocd-server argocd-repo-server argocd-applicationset-controller argocd-notifications-controller argocd-redis argocd-dex-server; do
+  kubectl get deploy "$d" -n argocd >/dev/null 2>&1 || continue
+  kubectl -n argocd rollout status deploy/"$d" --timeout=300s 2>/dev/null || \
+    warn "ArgoCD $d not yet rolled out — check: kubectl get pods -n argocd"
+done
+kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s 2>/dev/null || \
+  warn "argocd-application-controller not yet rolled out"
+
+log "ArgoCD ready at https://argocd.localhost:8443"
+log "Admin password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+
+# ─────────────────────────────────────────────────────────────────────────────
 step "Helm release health check"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -392,7 +462,8 @@ bad_releases=""
 for managed_release in \
   "cert-manager cert-manager" \
   "cattle-system rancher" \
-  "ingress-nginx ingress-nginx"; do
+  "ingress-nginx ingress-nginx" \
+  "argocd argocd"; do
   namespace="${managed_release%% *}"
   release="${managed_release#* }"
   status=$(helm status "$release" -n "$namespace" 2>/dev/null | awk -F': ' '$1 == "STATUS" { print $2 }')
@@ -403,7 +474,7 @@ done
 if [ -n "$bad_releases" ]; then
   err "Helm releases not in 'deployed' state:\n$bad_releases"
 fi
-helm list -A --filter '^(cert-manager|rancher|ingress-nginx)$' || true
+helm list -A --filter '^(cert-manager|rancher|ingress-nginx|argocd)$' || true
 log "All managed helm releases are healthy"
 
 if helm list -n kube-system -q 2>/dev/null | grep -Eq "^traefik(-crd)?$"; then
@@ -427,6 +498,7 @@ echo -e "${GREEN}┌────────────────────
 echo -e "${GREEN}│  LLM Log Analysis Platform (HTTPS Secured via mkcert)   │${NC}"
 echo -e "${GREEN}├──────────────────────────────────────────────────────────┤${NC}"
 echo -e "${GREEN}│  Rancher UI:    https://rancher.localhost:8443           │${NC}"
+echo -e "${GREEN}│  ArgoCD UI:     https://argocd.localhost:8443            │${NC}"
 echo -e "${GREEN}│  Chat UI:       https://chat.localhost:8443              │${NC}"
 echo -e "${GREEN}│  Grafana:       https://grafana.localhost:8443           │${NC}"
 echo -e "${GREEN}│  Prometheus:    https://prometheus.localhost:8443        │${NC}"
@@ -435,11 +507,14 @@ echo -e "${GREEN}│  Qwen3 4B API:  kubectl port-forward svc/qwen3-server 8000�
 echo -e "${GREEN}├──────────────────────────────────────────────────────────┤${NC}"
 echo -e "${GREEN}│  Rancher password: $RANCHER_PASSWORD                     │${NC}"
 echo -e "${GREEN}│  Grafana login:    admin / $RANCHER_PASSWORD             │${NC}"
+echo -e "${GREEN}│  ArgoCD admin pwd: kubectl -n argocd get secret \\         │${NC}"
+echo -e "${GREEN}│    argocd-initial-admin-secret -o \\                      │${NC}"
+echo -e "${GREEN}│    jsonpath='{.data.password}' | base64 -d              │${NC}"
 echo -e "${GREEN}└──────────────────────────────────────────────────────────┘${NC}"
 echo ""
 echo "Note: Vagrant forwards guest HTTPS 443 to host 8443."
 echo "If domains do not resolve, add them to your host's /etc/hosts file:"
-echo "127.0.0.1 rancher.localhost chat.localhost grafana.localhost prometheus.localhost"
+echo "127.0.0.1 rancher.localhost chat.localhost grafana.localhost prometheus.localhost argocd.localhost"
 echo ""
 echo "Test with:"
 echo "  curl -k -X POST https://chat.localhost:8443/api/analyze \\"
