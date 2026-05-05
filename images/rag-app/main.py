@@ -55,7 +55,7 @@ METRICS_NAMESPACES = [
 COLLECTION = os.getenv("COLLECTION", "logs")
 TOP_K = int(os.getenv("TOP_K", "3"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "600"))
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "48"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "256"))
 QWEN3_TIMEOUT = float(os.getenv("QWEN3_TIMEOUT", "180"))
 USE_LLM = os.getenv("USE_LLM", "false").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -66,8 +66,27 @@ client = httpx.Client(timeout=httpx.Timeout(connect=5.0, read=60.0, write=30.0, 
 SYSTEM_PROMPT = (
     "You are a DevOps log analyst. Use only LOGS. Reply in at most three "
     "short bullets: recurring error, likely cause, next fix. Mention source "
-    "or timestamp when present. If unclear, say so."
+    "or timestamp when present. If unclear, say so. /no_think"
 )
+
+METRICS_SYSTEM_PROMPT = (
+    "You are a DevOps SRE. Use ONLY the METRICS below to answer. "
+    "Reply in at most three short bullets: current state, anomaly, next action. "
+    "If a value is missing, say so. /no_think"
+)
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_thinking(text: str) -> str:
+    """Remove Qwen3 reasoning blocks and any trailing reflection that leaks."""
+    text = _THINK_BLOCK_RE.sub("", text)
+    for marker in ("\nWait,", "\nBut wait", "\nHmm,", "\nActually,"):
+        idx = text.find(marker)
+        if idx != -1:
+            text = text[:idx]
+    return text.strip()
 
 
 class QueryRequest(BaseModel):
@@ -119,10 +138,10 @@ def search_logs(vector: list[float], top_k: int) -> list[dict]:
 # ── Step 3: Build prompt with log context ────────────────────────────────────
 
 def build_prompt(question: str, log_chunks: list[dict]) -> str:
-    """Build a compact prompt.
+    """Build the user-message body. Caller pairs this with SYSTEM_PROMPT.
 
     CPU-only llama.cpp under VirtualBox is very sensitive to prompt size, so
-    this keeps retrieved context bounded and avoids the verbose chat template.
+    this keeps retrieved context bounded.
     """
     remaining = MAX_CONTEXT_CHARS
     context_parts = []
@@ -136,38 +155,36 @@ def build_prompt(question: str, log_chunks: list[dict]) -> str:
         context_parts.append(
             f"Source={c['source']} Level={c['level']} Time={c['timestamp']}\n{text}"
         )
-    context_block = "\n\n".join(
-        context_parts
-    )
-    return (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"LOGS:\n{context_block}\n\n"
-        f"QUESTION: {question}\n"
-        f"ANSWER:\n"
-    )
+    context_block = "\n\n".join(context_parts)
+    return f"LOGS:\n{context_block}\n\nQUESTION: {question}"
 
 
 # ── Step 4: Call Qwen3 via llama.cpp OpenAI API ──────────────────────────────
 
-def generate_analysis(prompt: str) -> str:
-    """Send the prompt to Qwen3 and return the full completion.
+def generate_analysis(system: str, user: str) -> str:
+    """Send a chat-formatted request to Qwen3 and return the full completion.
 
-    Non-streaming because llama-cpp-python's streaming path is unreliable in
-    this build. The prompt is deliberately compact so CPU inference returns.
+    Uses /v1/chat/completions so the Qwen3 chat template is applied properly:
+    the <|im_start|>/<|im_end|> envelope is added by the server, stop tokens
+    fire correctly, and the /no_think directive in the system message is
+    honored. chat_template_kwargs disables thinking for builds that support it.
     """
     resp = client.post(
-        f"{QWEN3_URL}/v1/completions",
+        f"{QWEN3_URL}/v1/chat/completions",
         json={
-            "prompt": prompt,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
             "max_tokens": MAX_TOKENS,
             "temperature": 0.3,
             "stream": False,
-            "stop": ["<|im_end|>", "<|im_start|>"],
+            "chat_template_kwargs": {"enable_thinking": False},
         },
         timeout=QWEN3_TIMEOUT,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["text"].strip()
+    return strip_thinking(resp.json()["choices"][0]["message"]["content"])
 
 
 def fast_log_analysis(question: str, log_chunks: list[dict]) -> str:
@@ -320,14 +337,8 @@ def select_metrics_namespaces(question: str, configured: list[str]) -> list[str]
 
 
 def build_metrics_prompt(question: str, metrics_text: str) -> str:
-    return (
-        "You are a DevOps SRE. Use ONLY the METRICS below to answer. "
-        "Reply in at most three short bullets: current state, anomaly, next action. "
-        "If a value is missing, say so.\n\n"
-        f"METRICS:\n{metrics_text}\n\n"
-        f"QUESTION: {question}\n"
-        f"ANSWER:\n"
-    )
+    """User-message body for the metrics path. Caller pairs with METRICS_SYSTEM_PROMPT."""
+    return f"METRICS:\n{metrics_text}\n\nQUESTION: {question}"
 
 
 def fast_metrics_analysis(question: str, metrics_text: str) -> str:
@@ -356,7 +367,10 @@ def analyze_logs(req: QueryRequest):
                 metrics_text = metrics_snapshot(queried)
                 if USE_LLM:
                     yield _ndjson("status", data="Generating analysis from live metrics...")
-                    answer = generate_analysis(build_metrics_prompt(req.question, metrics_text))
+                    answer = generate_analysis(
+                        METRICS_SYSTEM_PROMPT,
+                        build_metrics_prompt(req.question, metrics_text),
+                    )
                 else:
                     answer = fast_metrics_analysis(req.question, metrics_text)
                 yield _ndjson("token", data=answer)
@@ -378,8 +392,10 @@ def analyze_logs(req: QueryRequest):
 
             if USE_LLM:
                 yield _ndjson("status", data=f"Generating analysis from {len(log_chunks)} retrieved chunks...")
-                prompt = build_prompt(req.question, log_chunks)
-                answer = generate_analysis(prompt)
+                answer = generate_analysis(
+                    SYSTEM_PROMPT,
+                    build_prompt(req.question, log_chunks),
+                )
             else:
                 yield _ndjson("status", data=f"Summarizing {len(log_chunks)} retrieved chunks...")
                 answer = fast_log_analysis(req.question, log_chunks)
