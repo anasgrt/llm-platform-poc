@@ -3,20 +3,12 @@
 
 # Multi-VM configuration for better resource isolation
 # Control plane: k3s management (4GB RAM, 2 CPU)
-# Data plane: LLM workloads (20GB RAM, 4 CPU)
+# Data plane: worker capacity for ArgoCD-managed workloads (20GB RAM, 4 CPU)
 
 Vagrant.configure("2") do |config|
   # Ubuntu 24.04 base box
   config.vm.box = "bento/ubuntu-24.04"
   config.vm.box_version = "202502.21.0"
-
-  config.trigger.before :up do |trigger|
-    trigger.name = "Build Docker images"
-    trigger.info = "Building local Docker images before VM provisioning..."
-    trigger.run = {
-      inline: "bash build-images-local.sh"
-    }
-  end
 
   # Resize disks AFTER VM creation but BEFORE first boot (critical for VMDK format)
   # This ensures disks are resized before the VM starts, avoiding "locked media" errors
@@ -55,14 +47,14 @@ Vagrant.configure("2") do |config|
   end
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # VM 2: Data Plane (LLM workloads)
+  # VM 2: Data Plane (ArgoCD-managed workloads)
   # ─────────────────────────────────────────────────────────────────────────────
   config.vm.define "data" do |data|
     data.vm.hostname = "llm-data"
 
     data.vm.provider "virtualbox" do |vb|
       vb.name = "llm-platform-data"
-      vb.memory = "20480"  # 20GB RAM for LLM workloads
+      vb.memory = "20480"  # 20GB RAM for workload capacity
       vb.cpus = 4          # 4 CPU cores
       vb.customize ["modifyvm", :id, "--ioapic", "on"]
       vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
@@ -83,8 +75,8 @@ Vagrant.configure("2") do |config|
 
     # Deploy application stack after data plane is up
     data.trigger.after :up do |trigger|
-      trigger.name = "Deploy Stack"
-      trigger.info = "Deploying the LLM stack via setup.sh on control node..."
+      trigger.name = "Bootstrap Platform"
+      trigger.info = "Bootstrapping k3s, Rancher, ingress, and ArgoCD via setup.sh on control node..."
       trigger.run = {
         inline: "vagrant ssh control -c 'cd /vagrant && bash setup.sh'"
       }

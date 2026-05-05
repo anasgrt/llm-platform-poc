@@ -1,286 +1,147 @@
-# Log Analysis Platform — POC
+# LLM Platform POC Infrastructure
 
-Fast RAG analyzes your log files immediately from retrieved Qdrant chunks. Qwen3 4B is still deployed and can be enabled with `USE_LLM=true`, but the default stays deterministic because CPU-only inference under VirtualBox is too slow for interactive use. The Vagrant build also deploys Prometheus and Grafana for Kubernetes, node, and workload monitoring.
+This repository owns the local infrastructure layer for the LLM platform POC.
+It builds the Vagrant lab and installs the cluster management components:
+
+- two Vagrant VMs on VirtualBox
+- k3s control and data nodes
+- cert-manager
+- ingress-nginx
+- Rancher
+- ArgoCD
+- local TLS secrets needed by the GitOps workloads
+
+The Kubernetes workloads are now split into a separate folder/repository:
 
 ```txt
-┌─────────────────────────────────────────────────────────────┐
-│  Host Machine (macOS)                                       │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  VirtualBox + Vagrant                                 │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │  Control Plane VM (llm-control.local)           │  │  │
-│  │  │  ┌───────────────────────────────────────────┐  │  │  │
-│  │  │  │  k3s Control Plane                        │  │  │  │
-│  │  │  │  ┌─────────────────────────────────────┐  │  │  │  │
-│  │  │  │  │  Rancher UI                         │  │  │  │  │
-│  │  │  │  │  Kubernetes API                     │  │  │  │  │
-│  │  │  │  │  Cluster Management                 │  │  │  │  │
-│  │  │  │  └─────────────────────────────────────┘  │  │  │  │
-│  │  │  └───────────────────────────────────────────┘  │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │  Data Plane VM (llm-data.local)                 │  │  │
-│  │  │  ┌───────────────────────────────────────────┐  │  │  │
-│  │  │  │  k3s Worker Node                          │  │  │  │
-│  │  │  │  ┌─────────────────────────────────────┐  │  │  │  │
-│  │  │  │  │  namespace: ai-platform             │  │  │  │  │
-│  │  │  │  │  namespace: monitoring              │  │  │  │  │
-│  │  │  │  │  Prometheus + Grafana + exporters   │  │  │  │  │
-│  │  │  │  │                                     │  │  │  │  │
-│  │  │  │  │  ┌──────────┐  ┌────────┐  ┌──────┐ │  │  │  │  │
-│  │  │  │  │  │Embed svc ├─→┤ Qdrant │  │ Qwen │ │  │  │  │  │
-│  │  │  │  │  │MiniLM-L6 │  │Vectors │  │ 3.5  │ │  │  │  │  │
-│  │  │  │  │  └────┬─────┘  └───┬────┘  └──┬───┘ │  │  │  │  │
-│  │  │  │  │       └─────┬──────┘          │     │  │  │  │  │
-│  │  │  │  │        ┌────┴────┐            │     │  │  │  │  │
-│  │  │  │  │        │ RAG App ├────────────┘     │  │  │  │  │
-│  │  │  │  │        │ FastAPI │                  │  │  │  │  │
-│  │  │  │  │        └─────────┘                  │  │  │  │  │
-│  │  │  │  └─────────────────────────────────────┘  │  │  │  │
-│  │  │  └───────────────────────────────────────────┘  │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+../LLM-PLATFORM-POC-ARGOCD
 ```
+
+That ArgoCD repository owns the `ai-platform` and `monitoring` workloads:
+Qdrant, Qwen3, embedding server, RAG app, Fluent Bit, log retention,
+Prometheus, Grafana, node-exporter, kube-state-metrics, and sample-log
+ingestion.
 
 ## Prerequisites
 
-- macOS with Intel or Apple Silicon (M1/M2/M3)
-- VirtualBox 7.0+ — [Download](https://www.virtualbox.org/)
-- Vagrant 2.3+ — `brew install --cask vagrant`
-- Host machine: **24GB+ RAM available** (4GB for control plane + 20GB for data plane)
+- macOS with Intel or Apple Silicon
+- VirtualBox 7.0+
+- Vagrant 2.3+
+- Host machine with at least 24 GB RAM available
+- `mkcert` recommended for trusted local certificates
 
-## Quick Start
-
-### Option 1: Automatic Deployment (Recommended)
+## Start The Infrastructure
 
 ```bash
-# Start the VMs and deploy everything automatically
 ./deploy.sh
+```
 
-# For a fresh start (destroys existing VMs first)
+For a clean rebuild:
+
+```bash
 ./deploy.sh --redeploy
 ```
 
-This takes ~25-30 minutes on first run. Everything runs automatically:
-1. Builds 4 container images on the host (Qwen3, embeddings, RAG app, ingestion)
-2. Creates Control Plane VM with 4GB RAM, 2 CPU cores (Ubuntu 24.04)
-3. Creates Data Plane VM with 20GB RAM, 4 CPU cores (Ubuntu 24.04)
-4. Installs k3s server on control plane and joins the data plane worker
-5. Imports prebuilt images into k3s containerd on both nodes
-6. Installs Helm, cert-manager, ingress-nginx, and Rancher
-7. Deploys Prometheus, Grafana, node-exporter, and kube-state-metrics
-8. Deploys Qdrant, Qwen3 server, embedding server, RAG app to data plane
-9. Downloads Qwen3 model from HuggingFace
-10. Ingests sample log files into Qdrant
-
-### Option 2: Manual Multi-VM Control
+You can also use Vagrant directly:
 
 ```bash
-# Start both VMs
 vagrant up
-
-# Deploy platform manually from control plane
-vagrant ssh control -c 'cd /vagrant && ./setup.sh'
 ```
 
-### Deployment Architecture
+`vagrant up` provisions the VMs and runs `setup.sh` on the control node. It no
+longer applies application manifests. Workloads are deployed only through
+ArgoCD from `../LLM-PLATFORM-POC-ARGOCD`.
 
-**Scripts:**
-- `deploy.sh` — Host-side orchestrator for multi-VM deployment
-- `vagrant-provision.sh` — Unified provisioning script for both control and data planes
-  - Usage: `./vagrant-provision.sh control` or `./vagrant-provision.sh data`
-  - Control plane: k3s server, kubectl, kubeconfig setup
-  - Data plane: k3s worker join, kubectl, prebuilt image import
-- `setup.sh` — Deploys Helm charts and applies Kubernetes manifests
-  - Monitoring is applied from `manifests/07-monitoring.yaml`
+## What `setup.sh` Installs
+
+`setup.sh` runs inside the control VM and installs:
+
+- Helm
+- cert-manager
+- ingress-nginx as a DaemonSet with stable NodePorts
+- Rancher
+- workload namespaces and local TLS secrets
+- ArgoCD
+
+It intentionally does not apply `Deployment`, `DaemonSet`, `Job`, `CronJob`, or
+monitoring manifests. Those live in the ArgoCD repository.
+
+## Deploy The Workloads
+
+After the infrastructure is up and `../LLM-PLATFORM-POC-ARGOCD` has been pushed
+to GitHub, create the dev ArgoCD application:
+
+```bash
+vagrant ssh control -c \
+  'kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml'
+```
+
+ArgoCD will sync `deploy/overlays/dev` from the GitOps repository.
 
 ## Access
 
-| What | URL | Accessible From |
-|------|-----|----------------|
-| Chat UI | http://localhost:30080 | Host machine |
-| RAG API | http://localhost:30080/api/analyze | Host machine |
-| Health check | http://localhost:30080/health | Host machine |
-| Grafana | http://localhost:30300 | Host machine |
-| Prometheus | http://localhost:30090 | Host machine |
-| Chat UI HTTPS | https://localhost:30443 | Host machine (self-signed/default local cert warning expected) |
-| Rancher UI | https://rancher.localhost:8443 | Host machine (forwarded through ingress-nginx on control plane) |
+Infrastructure URLs:
 
-**Note:** The ingress is configured for `localhost` host. If you previously used `chat.localhost`, update your hosts file or use `localhost` directly.
+| What | URL |
+|------|-----|
+| Rancher | `https://rancher.localhost:8443` |
+| ArgoCD | `https://argocd.localhost:8443` |
 
-Rancher password: `SuperAdmin@123`
-Grafana login: `admin` / `SuperAdmin@123`
+Default credentials:
 
-**Note:** Traefik is disabled in k3s. ingress-nginx is the only ingress controller and serves both the application NodePorts and Rancher. Rancher intentionally uses `rancher.localhost` instead of bare `localhost` so it does not conflict with the application at `http://localhost:30080`.
+| System | Login |
+|--------|-------|
+| Rancher | `admin` / `SuperAdmin@123` |
+| ArgoCD | `admin` / `SuperAdmin@123` |
 
-Most systems resolve `*.localhost` to loopback. If yours does not, add `127.0.0.1 rancher.localhost` to the host machine's hosts file.
+Workload URLs after ArgoCD sync:
 
-## Test it
+| What | URL |
+|------|-----|
+| Chat UI | `https://chat.localhost:8443` |
+| Grafana | `https://grafana.localhost:8443` |
+| Prometheus | `https://prometheus.localhost:8443` |
 
-```bash
-# Via browser (from host)
-open http://localhost:30080
+If domains do not resolve, add this line to the host machine's hosts file:
 
-# Via API (from host)
-curl -s -X POST http://localhost:30080/api/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"question": "What caused the NFS outage?"}' | python3 -m json.tool
-
-# From inside data plane VM
-curl -s -X POST http://localhost:30080/api/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"question": "What caused the NFS outage?"}' | python3 -m json.tool
-
-# From inside control plane VM (via kubectl port-forward)
-kubectl port-forward -n ai-platform svc/log-analysis-app 8080:8000 &
-curl -s -X POST http://localhost:8080/api/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"question": "What caused the NFS outage?"}' | python3 -m json.tool
+```txt
+127.0.0.1 rancher.localhost argocd.localhost chat.localhost grafana.localhost prometheus.localhost
 ```
 
-## Ingest your own logs
+## Model Storage
 
-### Batch ingestion (static files)
+The ArgoCD workloads expect model files under `/vagrant/prebuilt-models` inside
+the VMs. Use this repository to prepare them:
 
 ```bash
-# Drop your log files in
-cp /path/to/your/*.log sample-logs/
-
-# Reload and re-ingest
-kubectl create configmap sample-logs \
-  --from-file=sample-logs/ -n ai-platform \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl delete job log-ingestion -n ai-platform --ignore-not-found
-kubectl apply -f manifests/05-ingestion-job.yaml
-
-# Watch progress
-kubectl logs -n ai-platform job/log-ingestion -f
+./download-models.sh
 ```
 
-### Live ingestion (running pods)
+The synced Vagrant folder exposes `prebuilt-models/` to the cluster nodes.
 
-The platform includes a live log ingestion pipeline that streams logs from running pods into the RAG vector store in near real time. See [`LIVE-LOG-INGESTION.md`](LIVE-LOG-INGESTION.md) for full details.
+## Operations
+
+Check cluster nodes:
 
 ```bash
-# Verify the pipeline is healthy
-kubectl get pods -n ai-platform -l app.kubernetes.io/name=fluent-bit
-
-# Watch Fluent Bit shipping batches
-kubectl logs -n ai-platform -l app.kubernetes.io/name=fluent-bit --tail=20
-
-# Check Qdrant point count growing over time
-kubectl exec -n ai-platform deploy/log-analysis-app -- \
-  python3 -c 'import urllib.request,json; \
-    print(json.loads(urllib.request.urlopen("http://qdrant:6333/collections/logs").read())["result"]["points_count"])'
+vagrant ssh control -c 'kubectl get nodes'
 ```
 
-## Monitor
+Check infrastructure pods:
 
 ```bash
-# Pod status
-kubectl get pods -n ai-platform
-kubectl get pods -n monitoring
-
-# Qwen3 logs (slow startup is normal — model loading takes 2-5 min)
-kubectl logs -n ai-platform deploy/qwen3-server -f
-
-# Resource usage
-kubectl top pods -n ai-platform
-
-# Prometheus targets
-kubectl port-forward -n monitoring svc/prometheus 9090:9090
-
-# Grafana dashboard
-kubectl port-forward -n monitoring svc/grafana 3000:3000
+vagrant ssh control -c 'kubectl get pods -A'
 ```
 
-Prometheus is also exposed from the host at `http://localhost:30090`, and Grafana is exposed at `http://localhost:30300`. Grafana is pre-provisioned with the Prometheus data source and an `LLM Platform Overview` dashboard.
-
-## Troubleshooting
-
-### Deployment Issues
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| `vagrant up control` hangs | Control plane VM resources | Check VirtualBox has 4GB RAM, 2 CPUs |
-| `vagrant up data` hangs | Data plane VM resources | Check VirtualBox has 20GB RAM, 4 CPUs |
-| `setup.sh failed` | Helm chart validation error | Check error logs, often annotation type mismatch |
-| Rancher pod not starting | Certificate webhook issue | Check ingress annotations in setup.sh |
-| Images not found | Build step failed | Run `docker images` inside data plane VM |
-| Pod `ImagePullBackOff` | Wrong pull policy | Should be `Never` for local builds |
-| k3s not ready | Provisioning timeout | SSH in: `vagrant ssh control && systemctl status k3s` |
-| Data plane not joining cluster | Network connectivity | Check both VMs on same subnet (192.168.56.x) |
-| Grafana or Prometheus not reachable | Monitoring NodePort not forwarded or pod not ready | Check `kubectl get pods -n monitoring` and Vagrantfile ports `30090`, `30300` |
-
-### Runtime Issues
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| Qwen3 pod stuck in `Init` | Model still downloading | `kubectl logs -n ai-platform deploy/qwen3-server -f` |
-| Qwen3 pod `CrashLoopBackOff` | VM memory too low | Increase VM RAM to 20GB in Vagrantfile |
-| Analysis request hangs | `USE_LLM=true` on CPU-only VirtualBox | Set `USE_LLM=false` in `manifests/04-rag-app.yaml` for Fast RAG |
-| `ErrImageNeverPull` | Image pull policy set to Never | Images are built inside VM, no import needed |
-| Embedding server OOMKilled | Memory limit too low | Check limits in manifests/03-embedding-server.yaml (needs 2Gi) |
-| Qdrant pod restarting | Insufficient memory for indexes | Increase to 1Gi in manifests/01-qdrant.yaml |
-| Ingestion job fails | Memory spike during embedding | Increase to 1Gi in manifests/05-ingestion-job.yaml |
-| `localhost:30080` not working | Port forward not configured | Check Vagrantfile has port 30080 forwarded |
-| Rancher loads the app instead of Rancher | Wrong host header | Use `https://rancher.localhost:8443`, not `https://localhost:8443` |
-| Rancher UI certificate warning | Self-signed cert (expected) | Click through the browser warning |
-
-### Manual Re-deployment
-
-If deployment fails partway through:
+Clean up Kubernetes namespaces and Helm-installed components from inside the
+control VM:
 
 ```bash
-# SSH into control plane VM
-vagrant ssh control
-
-# Clean up Kubernetes resources
-./teardown.sh
-
-# Re-run deployment
-cd /vagrant && ./setup.sh
+vagrant ssh control -c 'cd /vagrant && ./teardown.sh'
 ```
 
-Or from host:
-```bash
-# Full redeploy (destroys both VMs)
-./deploy.sh --redeploy
-```
-
-## Teardown
+Destroy the VMs from the host:
 
 ```bash
-# From inside VM - clean up Kubernetes resources
-./teardown.sh
-
-# From host machine - destroy the entire VM
 vagrant destroy
 ```
-
-`./teardown.sh` deletes Kubernetes resources. `vagrant destroy` removes the VMs, including VM-local monitoring data under `/var/lib/llm-platform/monitoring`.
-
-## What this is / what this isn't
-
-**Is:** A log analysis tool with both batch and live ingestion. You can feed it static log files via the ingestion job, or let the live pipeline stream logs from running pods in real time. Ask questions, get answers grounded in the most recent logs.
-
-**Is:** A live log monitor. A Fluent Bit DaemonSet tails container logs from running pods, enriches them with Kubernetes metadata, and streams them into the RAG vector store every 5 seconds. The LLM can answer questions about logs that arrived seconds ago.
-
-## Components
-
-| Pod | Image | Port | Probe |
-|-----|-------|------|-------|
-| qwen3-server | llama-cpp-python 0.3.20 | 8080 | /v1/models |
-| embedding-server | sentence-transformers 5.4.1 | 8080 | /health |
-| qdrant | qdrant/qdrant:latest | 6333 | /healthz |
-| log-analysis-app | FastAPI 0.136.0 | 8000 | /health |
-| fluent-bit | fluent/fluent-bit:3.2 | 2020 | /api/v1/health |
-| log-retention | curlimages/curl:latest | — | CronJob (daily at 02:00 UTC) |
-| prometheus | prom/prometheus v2.55.1 | 9090 | /-/ready |
-| grafana | grafana/grafana 11.4.0 | 3000 | /api/health |
-| node-exporter | prometheus/node-exporter v1.8.2 | 9100 | /metrics |
-| kube-state-metrics | kube-state-metrics v2.14.0 | 8080 | /metrics |
-
-Total RAM: ~15-16 GB for AI workloads plus ~1 GB for monitoring on the data plane VM. The Vagrant build allocates 20 GB to the data plane and 4 GB to the control plane.
