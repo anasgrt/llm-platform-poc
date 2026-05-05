@@ -40,8 +40,11 @@ spec:
                 - -c
                 - |
                   set -e
-                  CUTOFF=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-                           date -u -v-${RETENTION_DAYS}d +%Y-%m-%dT%H:%M:%SZ)
+                  # BusyBox date (Alpine) does not support GNU -d "N days ago" or BSD -v.
+                  # Compute cutoff via Unix timestamp arithmetic, then format with -d @epoch.
+                  NOW=$(date +%s)
+                  CUTOFF_EPOCH=$(( NOW - RETENTION_DAYS * 86400 ))
+                  CUTOFF=$(date -u -d "@${CUTOFF_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)
                   echo "Deleting points older than ${CUTOFF} (${RETENTION_DAYS} days) from ${COLLECTION}..."
                   RESP=$(curl -s -X POST \
                     "${QDRANT_URL}/collections/${COLLECTION}/points/delete" \
