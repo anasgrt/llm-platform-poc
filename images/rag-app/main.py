@@ -17,8 +17,10 @@ Environment variables:
 
 import json
 import os
+import re
+import uuid
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Body, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import traceback
@@ -45,6 +47,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 QWEN3_URL = os.getenv("QWEN3_URL", "http://qwen3-server:8080")
 EMBED_URL = os.getenv("EMBED_URL", "http://embedding-server:8080")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus.monitoring.svc.cluster.local:9090")
+METRICS_NAMESPACES = [
+    ns.strip() for ns in os.getenv("METRICS_NAMESPACE", "ai-platform").split(",")
+    if ns.strip()
+] or ["ai-platform"]
 COLLECTION = os.getenv("COLLECTION", "logs")
 TOP_K = int(os.getenv("TOP_K", "3"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "600"))
@@ -198,6 +205,138 @@ def fast_log_analysis(question: str, log_chunks: list[dict]) -> str:
     )
 
 
+# ── Prometheus: live metrics path ────────────────────────────────────────────
+
+METRICS_KEYWORDS = (
+    "cpu", "memory", "ram", "restart", "restarts", "usage", "utilization",
+    "node", "nodes", "pod status", "running", "healthy", "metric", "metrics",
+    "prometheus", "live", "current", "now",
+)
+
+
+def is_metrics_question(question: str) -> bool:
+    q = question.lower()
+    return any(k in q for k in METRICS_KEYWORDS)
+
+
+def prom_query(promql: str) -> list[dict]:
+    """Run a single instant PromQL query, return result vector entries."""
+    resp = client.get(
+        f"{PROMETHEUS_URL}/api/v1/query",
+        params={"query": promql},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("status") != "success":
+        return []
+    return data.get("data", {}).get("result", [])
+
+
+def _fmt_bytes(n: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if abs(n) < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TiB"
+
+
+def _per_namespace_queries(ns: str) -> dict:
+    return {
+        "Pods Running": (
+            f'kube_pod_status_phase{{namespace="{ns}",phase="Running"}} == 1',
+            lambda r: r["metric"].get("pod", "?"),
+            lambda v: "Running",
+        ),
+        "Pod CPU (cores, 5m avg)": (
+            f'sum by (pod) (rate(container_cpu_usage_seconds_total{{namespace="{ns}",pod!="",container!=""}}[5m]))',
+            lambda r: r["metric"].get("pod", "?"),
+            lambda v: f"{float(v):.3f}",
+        ),
+        "Pod Memory (working set)": (
+            f'sum by (pod) (container_memory_working_set_bytes{{namespace="{ns}",pod!="",container!=""}})',
+            lambda r: r["metric"].get("pod", "?"),
+            lambda v: _fmt_bytes(float(v)),
+        ),
+        "Container Restarts (1h)": (
+            f'sum by (pod) (increase(kube_pod_container_status_restarts_total{{namespace="{ns}"}}[1h]))',
+            lambda r: r["metric"].get("pod", "?"),
+            lambda v: f"{float(v):.0f}",
+        ),
+    }
+
+
+_GLOBAL_QUERIES = {
+    "Node CPU Utilization": (
+        '1 - avg by (kubernetes_node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle"}[5m]))',
+        lambda r: r["metric"].get("kubernetes_node", "?"),
+        lambda v: f"{float(v) * 100:.1f}%",
+    ),
+}
+
+
+def _render_queries(queries: dict) -> list[str]:
+    out = []
+    for title, (promql, label_fn, val_fn) in queries.items():
+        try:
+            results = prom_query(promql)
+        except Exception as e:
+            out.append(f"{title}: query failed ({type(e).__name__}: {e})")
+            continue
+        if not results:
+            out.append(f"{title}: (no data)")
+            continue
+        seen = {}
+        for r in results:
+            val = r.get("value", [None, None])[1]
+            if val is None:
+                continue
+            try:
+                seen[label_fn(r)] = val_fn(val)
+            except Exception:
+                continue
+        rows = sorted(seen.items())
+        body = "\n".join(f"  - {name}: {value}" for name, value in rows) or "  (empty)"
+        out.append(f"{title}:\n{body}")
+    return out
+
+
+def metrics_snapshot(namespaces: list[str]) -> str:
+    """Run PromQL snapshot queries for each namespace plus cluster-wide metrics."""
+    sections: list[str] = []
+    for ns in namespaces:
+        sections.append(f"=== Live metrics from Prometheus (namespace={ns}) ===")
+        sections.extend(_render_queries(_per_namespace_queries(ns)))
+    sections.append("=== Cluster-wide metrics ===")
+    sections.extend(_render_queries(_GLOBAL_QUERIES))
+    return "\n".join(sections)
+
+
+def select_metrics_namespaces(question: str, configured: list[str]) -> list[str]:
+    """If the question names a configured namespace, narrow to it; else query all."""
+    q = question.lower()
+    matched = [ns for ns in configured if ns.lower() in q]
+    return matched or configured
+
+
+def build_metrics_prompt(question: str, metrics_text: str) -> str:
+    return (
+        "You are a DevOps SRE. Use ONLY the METRICS below to answer. "
+        "Reply in at most three short bullets: current state, anomaly, next action. "
+        "If a value is missing, say so.\n\n"
+        f"METRICS:\n{metrics_text}\n\n"
+        f"QUESTION: {question}\n"
+        f"ANSWER:\n"
+    )
+
+
+def fast_metrics_analysis(question: str, metrics_text: str) -> str:
+    return (
+        f"Live metrics snapshot:\n\n{metrics_text}\n\n"
+        "(Set USE_LLM=true on the rag-app deployment for an LLM-generated summary.)"
+    )
+
+
 # ── API Endpoints ────────────────────────────────────────────────────────────
 
 def _ndjson(event_type: str, **fields) -> str:
@@ -210,6 +349,24 @@ def analyze_logs(req: QueryRequest):
 
     def event_stream():
         try:
+            if is_metrics_question(req.question):
+                queried = select_metrics_namespaces(req.question, METRICS_NAMESPACES)
+                ns_label = ", ".join(queried)
+                yield _ndjson("status", data=f"Querying Prometheus for live metrics ({ns_label})...")
+                metrics_text = metrics_snapshot(queried)
+                if USE_LLM:
+                    yield _ndjson("status", data="Generating analysis from live metrics...")
+                    answer = generate_analysis(build_metrics_prompt(req.question, metrics_text))
+                else:
+                    answer = fast_metrics_analysis(req.question, metrics_text)
+                yield _ndjson("token", data=answer)
+                yield _ndjson(
+                    "done",
+                    sources=[{"source": f"prometheus:{ns}"} for ns in queried],
+                    num_chunks_used=len(queried),
+                )
+                return
+
             yield _ndjson("status", data="Retrieving relevant log chunks...")
             query_vector = embed_text(req.question)
             log_chunks = search_logs(query_vector, req.top_k)
@@ -250,6 +407,92 @@ def analyze_logs(req: QueryRequest):
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
+# ── Live log ingestion (Fluent Bit / Vector / similar) ──────────────────────
+
+VECTOR_DIM = 384
+_collection_ready = False
+_LEVEL_RE = re.compile(r"\b(FATAL|ERROR|WARN|WARNING|INFO|DEBUG)\b", re.IGNORECASE)
+
+
+def ensure_collection() -> None:
+    global _collection_ready
+    if _collection_ready:
+        return
+    r = client.get(f"{QDRANT_URL}/collections/{COLLECTION}", timeout=5.0)
+    if r.status_code != 200:
+        client.put(
+            f"{QDRANT_URL}/collections/{COLLECTION}",
+            json={"vectors": {"size": VECTOR_DIM, "distance": "Cosine"}},
+            timeout=10.0,
+        )
+    _collection_ready = True
+
+
+def parse_shipper_record(rec: dict) -> dict | None:
+    """Normalize a Fluent Bit / Vector record into our log payload shape."""
+    text = rec.get("log") or rec.get("message") or rec.get("text")
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > 2000:
+        text = text[:2000] + "...[truncated]"
+
+    k8s = rec.get("kubernetes") or {}
+    ns = k8s.get("namespace_name", "")
+    pod = k8s.get("pod_name", "")
+    container = k8s.get("container_name", "")
+    if ns or pod:
+        source = "/".join(p for p in (ns, pod, container) if p)
+    else:
+        source = rec.get("source") or "live-stream"
+
+    level = "INFO"
+    m = _LEVEL_RE.search(text)
+    if m:
+        lvl = m.group(1).upper()
+        level = "WARN" if lvl == "WARNING" else ("ERROR" if lvl == "FATAL" else lvl)
+
+    return {
+        "text": text,
+        "source": source,
+        "level": level,
+        "timestamp": rec.get("@timestamp") or rec.get("time") or rec.get("date") or "",
+    }
+
+
+@app.post("/api/ingest")
+def ingest(records: list[dict] = Body(...)):
+    """Receive a batch of log records, embed them, upsert to Qdrant.
+
+    Designed for Fluent Bit's `http` output (format: json) — the body is a
+    JSON array of records. Returns a small JSON status so the shipper can
+    confirm acceptance.
+    """
+    ensure_collection()
+    parsed = [p for p in (parse_shipper_record(r) for r in records) if p]
+    if not parsed:
+        return {"ingested": 0, "skipped": len(records)}
+
+    texts = [p["text"] for p in parsed]
+    resp = client.post(f"{EMBED_URL}/embed", json={"texts": texts}, timeout=30.0)
+    resp.raise_for_status()
+    vectors = resp.json()["embeddings"]
+
+    points = [
+        {"id": str(uuid.uuid4()), "vector": v, "payload": p}
+        for p, v in zip(parsed, vectors)
+    ]
+    r = client.put(
+        f"{QDRANT_URL}/collections/{COLLECTION}/points",
+        json={"points": points},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return {"ingested": len(points), "skipped": len(records) - len(points)}
+
+
 @app.get("/health")
 def health():
     """Health check — verifies connectivity to all backends."""
@@ -258,6 +501,7 @@ def health():
         ("qwen3", f"{QWEN3_URL}/v1/models"),
         ("embed", f"{EMBED_URL}/health"),
         ("qdrant", f"{QDRANT_URL}/healthz"),
+        ("prometheus", f"{PROMETHEUS_URL}/-/ready"),
     ]
     for name, url in checks:
         try:
