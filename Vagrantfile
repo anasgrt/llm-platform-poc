@@ -73,12 +73,17 @@ Vagrant.configure("2") do |config|
     # Data plane provisioning
     data.vm.provision "shell", path: "vagrant-provision.sh", args: ["data"]
 
-    # Deploy application stack after data plane is up
+    # Bootstrap platform components after the data plane is up. setup.sh installs
+    # ArgoCD first; only then can the ArgoCD Application CRD accept app-dev.yaml.
     data.trigger.after :up do |trigger|
       trigger.name = "Bootstrap Platform"
-      trigger.info = "Bootstrapping k3s, Rancher, ingress, and ArgoCD via setup.sh on control node..."
+      trigger.info = "Bootstrapping k3s, Rancher, ingress, ArgoCD, and the dev GitOps application..."
       trigger.run = {
-        inline: "vagrant ssh control -c 'cd /vagrant && bash setup.sh'"
+        inline: <<~SHELL
+          vagrant ssh control -c 'cd /vagrant && bash setup.sh && \
+            kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=120s && \
+            kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml'
+        SHELL
       }
     end
   end
