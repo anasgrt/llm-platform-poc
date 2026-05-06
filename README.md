@@ -4,10 +4,6 @@ This repository provisions the local infrastructure for the LLM Platform proof o
 
 ## Architecture
 
-![Platform Architecture](architecture_diagram.png)
-
-### Repository Boundaries
-
 The platform is split across two repositories with distinct responsibilities:
 
 | Repository | Scope |
@@ -15,7 +11,7 @@ The platform is split across two repositories with distinct responsibilities:
 | **This repo (`llm-platform-poc`)** | VM lifecycle, k3s cluster, cert-manager, ingress-nginx, Rancher, ArgoCD, TLS secrets, workload namespaces |
 | **[llm-platform-poc-argocd](https://github.com/anasgrt/llm-platform-poc-argocd)** | AI platform workloads (Qdrant, Qwen3, embedding server, RAG app, Fluent Bit, log retention, ingestion), monitoring stack (Prometheus, Grafana, node-exporter, kube-state-metrics), Kustomize overlays, GitHub Actions CI, ArgoCD Application manifests |
 
-This repo does **not** deploy any application or monitoring workloads. Once ArgoCD is installed, the Vagrant bootstrap automatically applies the dev ArgoCD `Application` from the GitOps repository. ArgoCD then syncs all workloads into the cluster.
+This repo does **not** deploy any application or monitoring workloads. Once ArgoCD is installed, the Vagrant bootstrap automatically applies the dev ArgoCD `Application` from the GitOps repository, which then syncs all workloads into the cluster.
 
 ## Infrastructure Layout
 
@@ -35,6 +31,21 @@ Both VMs use Ubuntu 24.04 LTS (`bento/ubuntu-24.04`).
 - Vagrant 2.3+
 - Host machine with at least **24 GB RAM** available
 - `mkcert` (recommended for browser-trusted local TLS certificates)
+
+### Model Download
+
+The AI workloads expect model files under `/vagrant/prebuilt-models` inside the VMs. Download them **before** the first deployment:
+
+```bash
+./download-models.sh
+```
+
+| Model | Size | Purpose |
+|---|---|---|
+| `Qwen3-4B-Q4_K_M.gguf` | ~2.5 GB | LLM inference (quantized GGUF) |
+| `all-MiniLM-L6-v2/` | ~90 MB | Text embedding (384-dim) |
+
+The Vagrant synced folder exposes `prebuilt-models/` to both VMs at `/vagrant/prebuilt-models`.
 
 ## Quick Start
 
@@ -56,12 +67,6 @@ For a clean rebuild:
 ./deploy.sh --redeploy
 ```
 
-You can also use Vagrant directly:
-
-```bash
-vagrant up
-```
-
 ## What Gets Installed
 
 `setup.sh` runs inside the control VM and installs the following components in order:
@@ -77,15 +82,15 @@ vagrant up
 | 5 | Workload namespaces + TLS secrets | — | ai-platform, monitoring |
 | 6 | ArgoCD | chart 7.8.27 (v2.14.10) | argocd |
 
-After `setup.sh` completes, the Vagrant trigger applies:
+After setup completes, a Vagrant post-provision trigger applies the ArgoCD `Application` manifest:
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml
 ```
 
-This creates the `llm-platform-dev` ArgoCD Application, which auto-syncs `deploy/overlays/dev` from the GitOps repository into the cluster.
+This creates the `llm-platform-dev` Application, pointing ArgoCD at `deploy/overlays/dev` in the GitOps repository with automated sync and self-heal enabled.
 
-## GitOps Workloads (Deployed by ArgoCD)
+## GitOps Workloads
 
 Once ArgoCD syncs, the following workloads appear in the cluster — all managed by the [GitOps repository](https://github.com/anasgrt/llm-platform-poc-argocd):
 
@@ -110,48 +115,26 @@ Once ArgoCD syncs, the following workloads appear in the cluster — all managed
 | node-exporter | Host-level metrics |
 | kube-state-metrics | Kubernetes object metrics |
 
-### Environment Promotion
+## CI/CD & Environment Promotion
 
 The GitOps repository defines two Kustomize overlays:
 
 - **`dev`** — Auto-synced by ArgoCD on every GitHub Actions CI run
 - **`prod`** — Manual sync; promote by copying known-good tags from `dev`
 
-GitHub Actions builds four container images (`qwen3-server`, `embedding-server`, `rag-app`, `ingestion`), pushes them to GHCR, and bumps the image tags in the dev overlay automatically.
+GitHub Actions builds four container images (`qwen3-server`, `embedding-server`, `rag-app`, `ingestion`), pushes them to GHCR, and bumps the image tags in the dev overlay automatically. ArgoCD detects the commit and reconciles the cluster within seconds.
 
-## Model Storage
+## Access & Networking
 
-The AI workloads expect model files under `/vagrant/prebuilt-models` inside the VMs. Download them before the first deployment:
+### Service Endpoints
 
-```bash
-./download-models.sh
-```
-
-This downloads:
-
-| Model | Size | Purpose |
-|---|---|---|
-| `Qwen3-4B-Q4_K_M.gguf` | ~2.5 GB | LLM inference (quantized GGUF) |
-| `all-MiniLM-L6-v2/` | ~90 MB | Text embedding (384-dim) |
-
-The Vagrant synced folder exposes `prebuilt-models/` to both VMs at `/vagrant/prebuilt-models`.
-
-## Access
-
-### Infrastructure (available immediately after `setup.sh`)
-
-| Service | URL | Credentials |
-|---|---|---|
-| Rancher | `https://rancher.localhost:8443` | `admin` / `SuperAdmin@123` |
-| ArgoCD | `https://argocd.localhost:8443` | `admin` / `SuperAdmin@123` |
-
-### Workloads (available after ArgoCD sync)
-
-| Service | URL | Credentials |
-|---|---|---|
-| Chat UI | `https://chat.localhost:8443` | — |
-| Grafana | `https://grafana.localhost:8443` | `admin` / `SuperAdmin@123` |
-| Prometheus | `https://prometheus.localhost:8443` | — |
+| Service | URL | Credentials | Available After |
+|---|---|---|---|
+| Rancher | `https://rancher.localhost:8443` | `admin` / `SuperAdmin@123` | `setup.sh` |
+| ArgoCD | `https://argocd.localhost:8443` | `admin` / `SuperAdmin@123` | `setup.sh` |
+| Chat UI | `https://chat.localhost:8443` | — | ArgoCD sync |
+| Grafana | `https://grafana.localhost:8443` | `admin` / `SuperAdmin@123` | ArgoCD sync |
+| Prometheus | `https://prometheus.localhost:8443` | — | ArgoCD sync |
 
 If domains do not resolve, add this line to your host's `/etc/hosts`:
 
@@ -159,7 +142,7 @@ If domains do not resolve, add this line to your host's `/etc/hosts`:
 127.0.0.1 rancher.localhost argocd.localhost chat.localhost grafana.localhost prometheus.localhost
 ```
 
-## Port Forwarding
+### Port Forwarding
 
 Vagrant maps these guest NodePorts to host ports:
 
@@ -228,7 +211,6 @@ vagrant destroy           # Remove both VMs
 ├── teardown.sh               # In-cluster cleanup (deletes all namespaces)
 ├── download-models.sh        # Downloads Qwen3 + MiniLM models from HuggingFace
 ├── join-info.sh              # Auto-generated k3s join token (shared via /vagrant)
-├── architecture_diagram.png  # Platform architecture diagram
 ├── certs/                    # mkcert-generated TLS certificates
 ├── prebuilt-models/          # Downloaded LLM + embedding model files
 ├── prebuilt-images/          # Pre-exported container image tarballs
