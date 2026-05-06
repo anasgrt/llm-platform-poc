@@ -48,9 +48,9 @@ You can also use Vagrant directly:
 vagrant up
 ```
 
-`vagrant up` provisions the VMs and runs `setup.sh` on the control node. It no
-longer applies application manifests. Workloads are deployed only through
-ArgoCD from `../LLM-PLATFORM-POC-ARGOCD`.
+`vagrant up` provisions the VMs, runs `setup.sh` on the control node, and then
+applies the dev ArgoCD `Application` from the GitOps repository on GitHub.
+Workloads are deployed only through ArgoCD from `../LLM-PLATFORM-POC-ARGOCD`.
 
 ## What `setup.sh` Installs
 
@@ -68,12 +68,11 @@ monitoring manifests. Those live in the ArgoCD repository.
 
 ## Deploy The Workloads
 
-After the infrastructure is up and `../LLM-PLATFORM-POC-ARGOCD` has been pushed
-to GitHub, create the dev ArgoCD application:
+The normal `vagrant up` flow creates the dev ArgoCD application automatically
+after ArgoCD is installed by applying:
 
 ```bash
-vagrant ssh control -c \
-  'kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml'
+kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml
 ```
 
 ArgoCD will sync `deploy/overlays/dev` from the GitOps repository.

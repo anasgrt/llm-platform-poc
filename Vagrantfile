@@ -82,7 +82,9 @@ Vagrant.configure("2") do |config|
         inline: <<~SHELL
           vagrant ssh control -c 'cd /vagrant && bash setup.sh && \
             kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=120s && \
-            kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml'
+            echo "Applying llm-platform-dev ArgoCD Application from GitHub..." && \
+            kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml && \
+            echo "ArgoCD Application submitted; workload sync continues in ArgoCD."'
         SHELL
       }
     end
