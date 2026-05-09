@@ -1,6 +1,6 @@
 # LLM Platform POC — Infrastructure
 
-This repository provisions the local infrastructure for the LLM Platform proof of concept. It creates a two-node Kubernetes cluster on VirtualBox via Vagrant, installs the cluster management stack, and bootstraps the GitOps pipeline that drives all workload deployments.
+This repository provisions the local infrastructure for the LLM Platform proof of concept. It creates a two-node Kubernetes cluster on VirtualBox via Vagrant, installs ArgoCD, and bootstraps the App of Apps pipeline that cascade-installs the entire platform.
 
 ## Architecture
 
@@ -8,10 +8,10 @@ The platform is split across two repositories with distinct responsibilities:
 
 | Repository | Scope |
 |---|---|
-| **This repo (`llm-platform-poc`)** | VM lifecycle, k3s cluster, cert-manager, ingress-nginx, Rancher, ArgoCD, TLS secrets, workload namespaces |
-| **[llm-platform-poc-argocd](https://github.com/anasgrt/llm-platform-poc-argocd)** | AI platform workloads (Qdrant, Qwen3, embedding server, RAG app, Fluent Bit, log retention, ingestion), monitoring stack (Prometheus, Grafana, node-exporter, kube-state-metrics), Kustomize overlays, GitHub Actions CI, ArgoCD Application manifests |
+| **This repo (`llm-platform-poc`)** | VM lifecycle, k3s cluster, Traefik cleanup, namespaces, local TLS secrets, ArgoCD bootstrap |
+| **[llm-platform-poc-argocd](https://github.com/anasgrt/llm-platform-poc-argocd)** | **Everything else via App of Apps**: cert-manager, ingress-nginx, Rancher, AI platform workloads, monitoring stack, Kustomize overlays, GitHub Actions CI, ArgoCD Application manifests |
 
-This repo does **not** deploy any application or monitoring workloads. Once ArgoCD is installed, the Vagrant bootstrap automatically applies the dev ArgoCD `Application` from the GitOps repository, which then syncs all workloads into the cluster.
+This repo does **not** deploy any application, monitoring, or infrastructure Helm charts beyond ArgoCD itself. Once ArgoCD is installed, the Vagrant bootstrap applies the root App of Apps `Application` from the GitOps repository, which then cascade-installs the entire stack via sync waves.
 
 ## Infrastructure Layout
 
@@ -19,7 +19,7 @@ Two Vagrant VMs run on a private network (`192.168.56.0/24`):
 
 | VM | Hostname | IP | Resources | Role |
 |---|---|---|---|---|
-| Control | `llm-control` | `192.168.56.10` | 4 GB RAM, 2 CPU, 40 GB disk | k3s server, Rancher, ArgoCD, cert-manager, ingress-nginx |
+| Control | `llm-control` | `192.168.56.10` | 4 GB RAM, 2 CPU, 40 GB disk | k3s server, ArgoCD |
 | Data | `llm-data` | `192.168.56.11` | 20 GB RAM, 4 CPU, 60 GB disk | k3s agent, runs all ArgoCD-managed workloads |
 
 Both VMs use Ubuntu 24.04 LTS (`bento/ubuntu-24.04`).
@@ -57,9 +57,9 @@ This single command:
 
 1. Generates local TLS certificates via `mkcert` for `*.localhost` domains
 2. Provisions both VMs sequentially (`vagrant up control`, then `vagrant up data`)
-3. Runs `setup.sh` on the control node to install the management stack
-4. Applies the dev ArgoCD `Application` from the [GitOps repository](https://github.com/anasgrt/llm-platform-poc-argocd)
-5. ArgoCD auto-syncs all workloads into `ai-platform` and `monitoring` namespaces
+3. Runs `setup.sh` on the control node to install ArgoCD (the only Helm chart this repo manages)
+4. Applies the root App of Apps `Application` from the [GitOps repository](https://github.com/anasgrt/llm-platform-poc-argocd)
+5. ArgoCD cascade-installs the full stack via sync waves
 
 For a clean rebuild:
 
@@ -69,30 +69,33 @@ For a clean rebuild:
 
 ## What Gets Installed
 
-`setup.sh` runs inside the control VM and installs the following components in order:
+### Bootstrap layer (`setup.sh` — this repo)
 
-| Step | Component | Version | Namespace |
+`setup.sh` runs inside the control VM and handles the irreducible bootstrap:
+
+| Step | Component | Namespace |
+|---|---|---|
+| 0 | Preflight checks (hostname, k3s, nodes) | — |
+| 1 | k3s cluster validation | — |
+| 2 | Helm + Traefik removal | kube-system |
+| 3 | Namespaces + local TLS secrets | cattle-system, ingress-nginx, cert-manager, argocd, ai-platform, monitoring |
+| 4 | ArgoCD (chart 7.8.27 / v2.14.10) | argocd |
+| 5 | Root App of Apps Application | argocd |
+
+### ArgoCD-managed layer (sync waves — GitOps repo)
+
+After the root Application is applied, ArgoCD installs everything else in order:
+
+| Sync Wave | Component | Version | Namespace |
 |---|---|---|---|
-| 0 | Preflight checks | — | — |
-| 1 | k3s cluster validation | v1.35.4+k3s1 | — |
-| 2 | Helm + Traefik removal | — | kube-system |
-| 2 | cert-manager | v1.20.2 | cert-manager |
-| 3 | ingress-nginx (DaemonSet) | 4.15.1 | ingress-nginx |
-| 4 | Rancher | 2.14.1 | cattle-system |
-| 5 | Workload namespaces + TLS secrets | — | ai-platform, monitoring |
-| 6 | ArgoCD | chart 7.8.27 (v2.14.10) | argocd |
-
-After setup completes, a Vagrant post-provision trigger applies the ArgoCD `Application` manifest:
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/app-dev.yaml
-```
-
-This creates the `llm-platform-dev` Application, pointing ArgoCD at `deploy/overlays/dev` in the GitOps repository with automated sync and self-heal enabled.
+| 0 | cert-manager | v1.20.2 | cert-manager |
+| 1 | ingress-nginx (DaemonSet) | 4.15.1 | ingress-nginx |
+| 2 | Rancher | 2.14.1 | cattle-system |
+| 3 | AI platform + monitoring workloads | — | ai-platform, monitoring |
 
 ## GitOps Workloads
 
-Once ArgoCD syncs, the following workloads appear in the cluster — all managed by the [GitOps repository](https://github.com/anasgrt/llm-platform-poc-argocd):
+Once ArgoCD completes all sync waves, the following workloads appear in the cluster — all managed by the [GitOps repository](https://github.com/anasgrt/llm-platform-poc-argocd):
 
 ### `ai-platform` Namespace
 
@@ -130,11 +133,11 @@ GitHub Actions builds four container images (`qwen3-server`, `embedding-server`,
 
 | Service | URL | Credentials | Available After |
 |---|---|---|---|
-| Rancher | `https://rancher.localhost:8443` | `admin` / `SuperAdmin@123` | `setup.sh` |
 | ArgoCD | `https://argocd.localhost:8443` | `admin` / `SuperAdmin@123` | `setup.sh` |
-| Chat UI | `https://chat.localhost:8443` | — | ArgoCD sync |
-| Grafana | `https://grafana.localhost:8443` | `admin` / `SuperAdmin@123` | ArgoCD sync |
-| Prometheus | `https://prometheus.localhost:8443` | — | ArgoCD sync |
+| Rancher | `https://rancher.localhost:8443` | `admin` / `SuperAdmin@123` | Sync wave 2 |
+| Chat UI | `https://chat.localhost:8443` | — | Sync wave 3 |
+| Grafana | `https://grafana.localhost:8443` | `admin` / `SuperAdmin@123` | Sync wave 3 |
+| Prometheus | `https://prometheus.localhost:8443` | — | Sync wave 3 |
 
 If domains do not resolve, add this line to your host's `/etc/hosts`:
 
@@ -164,9 +167,10 @@ vagrant ssh control -c 'kubectl get nodes'
 vagrant ssh control -c 'kubectl get pods -A'
 ```
 
-Monitor ArgoCD-managed workloads:
+Monitor ArgoCD sync progress:
 
 ```bash
+vagrant ssh control -c 'kubectl get applications -n argocd'
 vagrant ssh control -c 'kubectl get pods -n ai-platform'
 vagrant ssh control -c 'kubectl get pods -n monitoring'
 ```
@@ -206,7 +210,7 @@ vagrant destroy           # Remove both VMs
 .
 ├── Vagrantfile               # Two-VM definition (control + data)
 ├── deploy.sh                 # Host-side orchestrator (mkcert + vagrant up)
-├── setup.sh                  # Control-node bootstrap (Helm, cert-manager, nginx, Rancher, ArgoCD)
+├── setup.sh                  # Control-node bootstrap (Helm, ArgoCD, root App of Apps)
 ├── vagrant-provision.sh      # Per-node provisioning (k3s server/agent, disk, DNS)
 ├── teardown.sh               # In-cluster cleanup (deletes all namespaces)
 ├── download-models.sh        # Downloads Qwen3 + MiniLM models from HuggingFace
