@@ -153,20 +153,7 @@ printf "    argocdServerAdminPassword: '%s'\n" "$ARGOCD_PASSWORD_BCRYPT" >> "$AR
 
 cat >> "$ARGOCD_VALUES" <<EOF
 
-controller:
-  resources:
-    requests:
-      cpu: 250m
-      memory: 256Mi
-  readinessProbe:
-    timeoutSeconds: 5
-    failureThreshold: 6
-
 repoServer:
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
   readinessProbe:
     timeoutSeconds: 5
     failureThreshold: 6
@@ -175,10 +162,6 @@ repoServer:
     failureThreshold: 6
 
 server:
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
   readinessProbe:
     timeoutSeconds: 5
     failureThreshold: 6
