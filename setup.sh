@@ -248,7 +248,7 @@ RANCHER_ELAPSED=0
 log "Waiting up to ${RANCHER_TIMEOUT}s for Rancher to become ready..."
 while true; do
   READY=$(kubectl get pod -n cattle-system -l app=rancher \
-    -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null)
+    -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
   if [ "$READY" = "true" ]; then
     log "Rancher pod is ready (took ~${RANCHER_ELAPSED}s)"
     break
