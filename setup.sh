@@ -30,7 +30,7 @@ err()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 step() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  $1${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
 ARGOCD_PASSWORD="SuperAdmin@123"
-ARGOCD_CHART_VERSION="7.8.27"   # argo-cd chart 7.8.27 ⇒ ArgoCD v2.14.10
+ARGOCD_CHART_VERSION="9.5.13"   # argo-cd chart 9.5.13 ⇒ ArgoCD v3.4.1
 
 ROOT_APP_URL="https://raw.githubusercontent.com/anasgrt/LLM-PLATFORM-POC-ARGOCD/main/argocd/root.yaml"
 
@@ -179,7 +179,6 @@ global:
 configs:
   params:
     server.insecure: true
-    controller.diff.server.side: "true"
   secret:
     argocdServerAdminPasswordMtime: "$ARGOCD_PASSWORD_MTIME"
 EOF
@@ -195,7 +194,8 @@ server:
 EOF
 if [ -f /vagrant/certs/local-cert.pem ] && [ -f /vagrant/certs/local-key.pem ]; then
   cat >> "$ARGOCD_VALUES" <<EOF
-    tls:
+    tls: true
+    extraTls:
       - secretName: local-tls-cert
         hosts:
           - argocd.localhost
