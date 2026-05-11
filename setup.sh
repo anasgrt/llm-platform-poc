@@ -240,7 +240,30 @@ log "  Wave 2: Rancher"
 log "  Wave 3: AI platform + monitoring workloads"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 6: Health check"
+step "STEP 6: Wait for sync-wave services"
+# ─────────────────────────────────────────────────────────────────────────────
+
+RANCHER_TIMEOUT=300
+RANCHER_ELAPSED=0
+log "Waiting up to ${RANCHER_TIMEOUT}s for Rancher to become ready..."
+while true; do
+  READY=$(kubectl get pod -n cattle-system -l app=rancher \
+    -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null)
+  if [ "$READY" = "true" ]; then
+    log "Rancher pod is ready (took ~${RANCHER_ELAPSED}s)"
+    break
+  fi
+  if [ "$RANCHER_ELAPSED" -ge "$RANCHER_TIMEOUT" ]; then
+    warn "Rancher did not become ready within ${RANCHER_TIMEOUT}s — continuing anyway"
+    warn "Check: kubectl get pods -n cattle-system"
+    break
+  fi
+  sleep 10
+  RANCHER_ELAPSED=$((RANCHER_ELAPSED + 10))
+done
+
+# ─────────────────────────────────────────────────────────────────────────────
+step "STEP 7: Health check"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Verify ArgoCD helm release is healthy (the only chart this script installs).
