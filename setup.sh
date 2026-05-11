@@ -179,6 +179,7 @@ global:
 configs:
   params:
     server.insecure: true
+    controller.diff.server.side: "true"
   secret:
     argocdServerAdminPasswordMtime: "$ARGOCD_PASSWORD_MTIME"
 EOF
