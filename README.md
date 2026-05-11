@@ -8,7 +8,7 @@ The platform is split across two repositories with distinct responsibilities:
 
 | Repository | Scope |
 |---|---|
-| **This repo (`llm-platform-poc`)** | VM lifecycle, k3s cluster, Traefik cleanup, namespaces, local TLS secrets, ArgoCD bootstrap |
+| **This repo (`llm-platform-poc`)** | VM lifecycle, k3s cluster, namespaces, local TLS secrets, ArgoCD bootstrap |
 | **[llm-platform-poc-argocd](https://github.com/anasgrt/llm-platform-poc-argocd)** | **Everything else via App of Apps**: cert-manager, ingress-nginx, Rancher, AI platform workloads, monitoring stack, Kustomize overlays, GitHub Actions CI, ArgoCD Application manifests |
 
 This repo does **not** deploy any application, monitoring, or infrastructure Helm charts beyond ArgoCD itself. Once ArgoCD is installed, the Vagrant bootstrap applies the root App of Apps `Application` from the GitOps repository, which then cascade-installs the entire stack via sync waves.
@@ -20,7 +20,7 @@ Two Vagrant VMs run on a private network (`192.168.56.0/24`):
 | VM | Hostname | IP | Resources | Role |
 |---|---|---|---|---|
 | Control | `llm-control` | `192.168.56.10` | 4 GB RAM, 2 CPU, 40 GB disk | k3s server, ArgoCD |
-| Data | `llm-data` | `192.168.56.11` | 20 GB RAM, 4 CPU, 60 GB disk | k3s agent, runs all ArgoCD-managed workloads |
+| Data | `llm-data` | `192.168.56.11` | 12 GB RAM, 4 CPU, 60 GB disk | k3s agent, runs all ArgoCD-managed workloads |
 
 Both VMs use Ubuntu 24.04 LTS (`bento/ubuntu-24.04`).
 
@@ -29,7 +29,7 @@ Both VMs use Ubuntu 24.04 LTS (`bento/ubuntu-24.04`).
 - macOS (Intel or Apple Silicon)
 - VirtualBox 7.0+
 - Vagrant 2.3+
-- Host machine with at least **24 GB RAM** available
+- Host machine with at least **16 GB RAM** available
 - `mkcert` (recommended for browser-trusted local TLS certificates)
 
 ### Model Download
@@ -76,11 +76,12 @@ For a clean rebuild:
 | Step | Component | Namespace |
 |---|---|---|
 | 0 | Preflight checks (hostname, k3s, nodes) | — |
-| 1 | k3s cluster validation | — |
-| 2 | Helm + Traefik removal | kube-system |
-| 3 | Namespaces + local TLS secrets | cattle-system, ingress-nginx, cert-manager, argocd, ai-platform, monitoring |
-| 4 | ArgoCD (chart 7.8.27 / v2.14.10) | argocd |
-| 5 | Root App of Apps Application | argocd |
+| 1 | Helm | — |
+| 2 | Namespaces + local TLS secrets | cattle-system, ingress-nginx, cert-manager, argocd, ai-platform, monitoring |
+| 3 | ArgoCD (chart 9.5.13 / v3.4.1) | argocd |
+| 4 | Root App of Apps Application | argocd |
+| 5 | Wait for Rancher readiness | cattle-system |
+| 6 | Health check | argocd |
 
 ### ArgoCD-managed layer (sync waves — GitOps repo)
 

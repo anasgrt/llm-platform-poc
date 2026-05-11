@@ -6,7 +6,7 @@ set -euo pipefail
 # =============================================================================
 # This script orchestrates the two-VM deployment with resource isolation:
 # - Control plane: k3s management (4GB RAM, 2 CPU)
-# - Data plane: worker capacity for ArgoCD-managed workloads (20GB RAM, 4 CPU)
+# - Data plane: worker capacity for ArgoCD-managed workloads (12GB RAM, 4 CPU)
 #
 # Note: You can also just run 'vagrant up' for automatic deployment.
 #       This script provides more control and better output formatting.
@@ -110,35 +110,6 @@ echo ""
 
 # Start data plane
 vagrant up data
-
-# ─────────────────────────────────────────────────────────────────────────────
-step "Waiting for k3s Worker"
-# ─────────────────────────────────────────────────────────────────────────────
-
-echo "Waiting for data plane to be ready..."
-echo ""
-
-# Wait for data plane node to be ready
-vagrant ssh control --command "bash -c '
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-echo \"Waiting for data plane node to join cluster...\"
-MAX_WAIT=120
-WAIT_COUNT=0
-while ! kubectl get nodes 2>/dev/null | grep -q \"llm-data.*Ready\"; do
-  WAIT_COUNT=$((WAIT_COUNT + 1))
-  if [ \$WAIT_COUNT -ge \$MAX_WAIT ]; then
-    echo \"Timeout waiting for data plane. Current nodes:\"
-    kubectl get nodes 2>/dev/null || echo \"kubectl not ready\"
-    exit 1
-  fi
-  echo \"Waiting for data plane node... (\$WAIT_COUNT/\$MAX_WAIT, 10s)\"
-  sleep 10
-done
-echo \"Data plane is ready!\"
-kubectl get nodes
-'"
-
-echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "Infrastructure Complete!"

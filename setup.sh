@@ -9,7 +9,6 @@ set -euo pipefail
 # What gets installed here (bootstrap layer — the irreducible minimum):
 #   - k3s Kubernetes cluster validation
 #   - Helm
-#   - Traefik cleanup (k3s default, replaced by ArgoCD-managed ingress-nginx)
 #   - Namespaces and local TLS secrets (mkcert certs from deploy.sh)
 #   - ArgoCD
 #
@@ -78,15 +77,7 @@ log "Kubernetes cluster is ready with both nodes"
 kubectl get nodes
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 1: Verify k3s cluster"
-# ─────────────────────────────────────────────────────────────────────────────
-
-log "Using k3s Kubernetes cluster (provided by Vagrant)"
-kubectl cluster-info
-log "Kubernetes cluster is ready"
-
-# ─────────────────────────────────────────────────────────────────────────────
-step "STEP 2: Install Helm & remove Traefik"
+step "STEP 1: Install Helm"
 # ─────────────────────────────────────────────────────────────────────────────
 
 if ! command -v helm &>/dev/null; then
@@ -97,32 +88,8 @@ else
   log "Helm already installed"
 fi
 
-# k3s installs Traefik by default unless the server was started with
-# --disable=traefik. New VMs use that flag from vagrant-provision.sh; this block
-# also cleans up older lab clusters so nginx remains the only ingress controller.
-log "Ensuring bundled k3s Traefik is disabled..."
-sudo mkdir -p /etc/rancher/k3s/config.yaml.d
-printf "disable:\n  - traefik\n" | sudo tee /etc/rancher/k3s/config.yaml.d/10-disable-traefik.yaml >/dev/null
-
-if [ -f /var/lib/rancher/k3s/server/manifests/traefik.yaml ]; then
-  sudo mv /var/lib/rancher/k3s/server/manifests/traefik.yaml \
-    /var/lib/rancher/k3s/server/manifests/traefik.yaml.disabled 2>/dev/null || \
-    sudo rm -f /var/lib/rancher/k3s/server/manifests/traefik.yaml
-fi
-kubectl -n kube-system delete helmchart traefik --ignore-not-found=true 2>/dev/null || true
-kubectl -n kube-system delete helmchart traefik-crd --ignore-not-found=true 2>/dev/null || true
-kubectl -n kube-system delete helmchartconfig traefik --ignore-not-found=true 2>/dev/null || true
-for release in traefik traefik-crd; do
-  if helm list -n kube-system -q 2>/dev/null | grep -qx "$release"; then
-    helm uninstall "$release" -n kube-system || warn "Could not uninstall $release Helm release; continuing"
-  fi
-done
-kubectl -n kube-system delete service traefik --ignore-not-found=true 2>/dev/null || true
-kubectl -n kube-system delete deployment traefik --ignore-not-found=true 2>/dev/null || true
-kubectl delete ingressclass traefik --ignore-not-found=true 2>/dev/null || true
-
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 3: Prepare namespaces and TLS secrets"
+step "STEP 2: Prepare namespaces and TLS secrets"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Pre-create namespaces that need TLS secrets from local mkcert certificates.
@@ -157,7 +124,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 4: Install ArgoCD"
+step "STEP 3: Install ArgoCD"
 # ─────────────────────────────────────────────────────────────────────────────
 
 helm repo add argo https://argoproj.github.io/argo-helm --force-update >/dev/null
@@ -226,7 +193,7 @@ log "ArgoCD ready at https://argocd.localhost:8443"
 log "Login: admin / $ARGOCD_PASSWORD"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 5: Apply root App of Apps"
+step "STEP 4: Apply root App of Apps"
 # ─────────────────────────────────────────────────────────────────────────────
 
 kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=120s
@@ -240,7 +207,7 @@ log "  Wave 2: Rancher"
 log "  Wave 3: AI platform + monitoring workloads"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 6: Wait for sync-wave services"
+step "STEP 5: Wait for sync-wave services"
 # ─────────────────────────────────────────────────────────────────────────────
 
 RANCHER_TIMEOUT=300
@@ -263,7 +230,7 @@ while true; do
 done
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "STEP 7: Health check"
+step "STEP 6: Health check"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Verify ArgoCD helm release is healthy (the only chart this script installs).
@@ -272,14 +239,6 @@ if [ "$argocd_status" != "deployed" ]; then
   err "ArgoCD helm release not in 'deployed' state: ${argocd_status:-missing}"
 fi
 log "ArgoCD helm release is healthy"
-
-if helm list -n kube-system -q 2>/dev/null | grep -Eq "^traefik(-crd)?$"; then
-  err "Traefik Helm release still exists after cleanup"
-fi
-if kubectl get ingressclass traefik >/dev/null 2>&1; then
-  err "Traefik IngressClass still exists after cleanup"
-fi
-log "Traefik is disabled and no Traefik ingress path remains"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "DONE — Bootstrap complete"

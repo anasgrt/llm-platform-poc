@@ -235,17 +235,24 @@ provision_control() {
     # Configure DNS
     configure_dns
 
-    # Keep k3s's bundled Traefik disabled across service restarts. setup.sh also
-    # cleans up any Traefik objects from older VMs that were created before this.
     mkdir -p /etc/rancher/k3s/config.yaml.d
     cat > /etc/rancher/k3s/config.yaml.d/10-disable-traefik.yaml << 'EOF'
 disable:
   - traefik
 EOF
 
+    cat > /etc/rancher/k3s/config.yaml.d/20-control-plane.yaml << 'EOF'
+node-taint:
+  - "node-role.kubernetes.io/control-plane=:NoSchedule"
+kubelet-arg:
+  - "kube-reserved=cpu=500m,memory=512Mi"
+  - "system-reserved=cpu=250m,memory=256Mi"
+  - "eviction-hard=memory.available<256Mi,nodefs.available<10%"
+EOF
+
     # Install k3s as server (control plane)
     echo "==> Installing k3s server..."
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC="--cluster-init --disable=traefik --tls-san 192.168.56.10 --node-ip 192.168.56.10 --advertise-address 192.168.56.10 --flannel-iface=eth1" sh -
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC="--cluster-init --tls-san 192.168.56.10 --node-ip 192.168.56.10 --advertise-address 192.168.56.10 --flannel-iface=eth1" sh -
 
     # Install kubectl
     install_kubectl
