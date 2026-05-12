@@ -24,12 +24,79 @@ if [[ "$NODE_TYPE" != "control" && "$NODE_TYPE" != "data" ]]; then
 fi
 
 K3S_VERSION="v1.35.4+k3s1"
+CONTROL_MIN_CPUS=6
+CONTROL_MIN_MEMORY_MIB=11264
+DATA_MIN_CPUS=4
+DATA_MIN_MEMORY_MIB=11264
 
 echo "==> Provisioning $NODE_TYPE plane VM..."
 
 # =============================================================================
 # Common Functions
 # =============================================================================
+
+validate_vm_resources() {
+    local min_cpus="$1"
+    local min_memory_mib="$2"
+    local role="$3"
+    local cpus
+    local memory_mib
+
+    cpus=$(nproc)
+    memory_mib=$(awk '/MemTotal/ { print int($2 / 1024) }' /proc/meminfo)
+
+    if [ "$cpus" -lt "$min_cpus" ] || [ "$memory_mib" -lt "$min_memory_mib" ]; then
+        echo "Error: $role VM is undersized."
+        echo "       Required: >=${min_cpus} CPUs and >=${min_memory_mib}MiB RAM."
+        echo "       Detected: ${cpus} CPUs and ${memory_mib}MiB RAM."
+        echo "       Do not reduce Vagrant resources below these limits; Rancher/k3s becomes unstable."
+        exit 1
+    fi
+
+    echo "==> $role VM resources OK (${cpus} CPUs, ${memory_mib}MiB RAM)"
+}
+
+install_k3s_ip_start_guard() {
+    local service_name="$1"
+    local node_ip="$2"
+    local iface="$3"
+
+    echo "==> Installing ${service_name} startup guard for ${node_ip} on ${iface}..."
+
+    cat > /usr/local/bin/wait-for-k3s-node-ip << 'EOF'
+#!/bin/bash
+set -euo pipefail
+
+node_ip="$1"
+iface="$2"
+timeout="${3:-120}"
+
+for ((i = 0; i < timeout; i++)); do
+    if ip -4 addr show dev "$iface" | grep -q " ${node_ip}/"; then
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "Timed out waiting for ${node_ip} on ${iface}" >&2
+ip -br addr >&2 || true
+exit 1
+EOF
+    chmod 0755 /usr/local/bin/wait-for-k3s-node-ip
+
+    mkdir -p "/etc/systemd/system/${service_name}.service.d"
+    cat > "/etc/systemd/system/${service_name}.service.d/10-wait-for-node-ip.conf" << EOF
+[Unit]
+Wants=network-online.target
+After=network-online.target systemd-networkd-wait-online.service
+
+[Service]
+ExecStartPre=/usr/local/bin/wait-for-k3s-node-ip ${node_ip} ${iface} 120
+RestartSec=15s
+EOF
+
+    systemctl daemon-reload
+}
 
 expand_disk() {
     echo "==> Expanding disk to use full allocated space..."
@@ -229,6 +296,8 @@ EOF
 # =============================================================================
 
 provision_control() {
+    validate_vm_resources "$CONTROL_MIN_CPUS" "$CONTROL_MIN_MEMORY_MIB" "Control plane"
+
     # Expand disk to use full allocated space
     expand_disk
 
@@ -245,14 +314,15 @@ EOF
 node-taint:
   - "node-role.kubernetes.io/control-plane=:NoSchedule"
 kubelet-arg:
-  - "kube-reserved=cpu=500m,memory=512Mi"
-  - "system-reserved=cpu=250m,memory=256Mi"
-  - "eviction-hard=memory.available<256Mi,nodefs.available<10%"
+  - "kube-reserved=cpu=750m,memory=1Gi"
+  - "system-reserved=cpu=500m,memory=512Mi"
+  - "eviction-hard=memory.available<512Mi,nodefs.available<10%"
 EOF
 
     # Install k3s as server (control plane)
     echo "==> Installing k3s server..."
     curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC="--cluster-init --tls-san 192.168.56.10 --node-ip 192.168.56.10 --advertise-address 192.168.56.10 --flannel-iface=eth1" sh -
+    install_k3s_ip_start_guard "k3s" "192.168.56.10" "eth1"
 
     # Install kubectl
     install_kubectl
@@ -288,6 +358,8 @@ EOF
 # =============================================================================
 
 provision_data() {
+    validate_vm_resources "$DATA_MIN_CPUS" "$DATA_MIN_MEMORY_MIB" "Data plane"
+
     # Expand disk to use full allocated space
     expand_disk
 
@@ -314,6 +386,7 @@ provision_data() {
     # Install k3s as worker (join existing cluster)
     echo "==> Joining k3s cluster as worker..."
     curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" K3S_URL="$K3S_URL" K3S_TOKEN="$K3S_TOKEN" INSTALL_K3S_EXEC="--node-ip 192.168.56.11 --flannel-iface=eth1" sh -
+    install_k3s_ip_start_guard "k3s-agent" "192.168.56.11" "eth1"
 
     # Install kubectl (useful for local debugging)
     install_kubectl

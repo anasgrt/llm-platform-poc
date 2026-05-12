@@ -2,7 +2,7 @@
 # vi: set ft=ruby :
 
 # Multi-VM configuration for better resource isolation
-# Control plane: k3s management (6GB RAM, 2 CPU)
+# Control plane: k3s management and Rancher (12GB RAM, 6 CPU)
 # Data plane: worker capacity for ArgoCD-managed workloads (12GB RAM, 4 CPU)
 
 Vagrant.configure("2") do |config|
@@ -28,8 +28,8 @@ Vagrant.configure("2") do |config|
 
     control.vm.provider "virtualbox" do |vb|
       vb.name = "llm-platform-control"
-      vb.memory = "8192"   # 8GB RAM for control plane and Rancher
-      vb.cpus = 4          # 4 CPU cores
+      vb.memory = "12288"  # 12GB RAM for control plane and Rancher
+      vb.cpus = 6          # 6 CPU cores
       vb.customize ["modifyvm", :id, "--ioapic", "on"]
       vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
       vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
