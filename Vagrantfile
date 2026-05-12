@@ -3,7 +3,7 @@
 
 # Multi-VM configuration for better resource isolation
 # Control plane: k3s management and Rancher (12GB RAM, 6 CPU)
-# Data plane: worker capacity for ArgoCD-managed workloads (12GB RAM, 4 CPU)
+# Data plane: worker capacity for ArgoCD-managed workloads (12GB RAM, 2 CPU)
 
 Vagrant.configure("2") do |config|
   # Ubuntu 24.04 base box
@@ -55,7 +55,7 @@ Vagrant.configure("2") do |config|
     data.vm.provider "virtualbox" do |vb|
       vb.name = "llm-platform-data"
       vb.memory = "12288"  # 12GB RAM for workload capacity
-      vb.cpus = 4          # 4 CPU cores
+      vb.cpus = 2          # 2 CPU cores
       vb.customize ["modifyvm", :id, "--ioapic", "on"]
       vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
       vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
