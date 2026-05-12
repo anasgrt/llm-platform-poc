@@ -28,8 +28,8 @@ Vagrant.configure("2") do |config|
 
     control.vm.provider "virtualbox" do |vb|
       vb.name = "llm-platform-control"
-      vb.memory = "6144"   # 6GB RAM for control plane and Rancher
-      vb.cpus = 2          # 2 CPU cores
+      vb.memory = "8192"   # 8GB RAM for control plane and Rancher
+      vb.cpus = 4          # 4 CPU cores
       vb.customize ["modifyvm", :id, "--ioapic", "on"]
       vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
       vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
