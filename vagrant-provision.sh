@@ -366,6 +366,14 @@ provision_data() {
     # Configure DNS
     configure_dns
 
+    mkdir -p /etc/rancher/k3s/config.yaml.d
+    cat > /etc/rancher/k3s/config.yaml.d/20-data-plane.yaml << 'EOF'
+kubelet-arg:
+  - "kube-reserved=cpu=250m,memory=512Mi"
+  - "system-reserved=cpu=250m,memory=512Mi"
+  - "eviction-hard=memory.available<512Mi,nodefs.available<10%"
+EOF
+
     # Wait for control plane to be ready
     echo "==> Waiting for control plane to be ready..."
     until ping -c 1 192.168.56.10 >/dev/null 2>&1; do
